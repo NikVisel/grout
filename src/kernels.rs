@@ -749,10 +749,8 @@ pub mod kernels {
     // BM_S iterations (vs seq_len before). Grid now scales with
     // max_seq_len instead of being pinned to num_kv_heads=8.
     //
-    // ASSUMPTION: position_start is a multiple of BM_S. Prefill always
-    // passes 0, so this holds in practice. If a future caller needs
-    // mid-stream writes at arbitrary offsets, they should use the
-    // dynpos variant or extend this kernel.
+    // Each CTA owns absolute cache slots; translate those slots back into
+    // query rows. This also supports unaligned, nonzero MTP suffix writes.
     #[cutile::entry(print_ir=false,
                        unchecked_accesses=true,
                        optimization_hints = (
@@ -763,7 +761,7 @@ pub mod kernels {
         new_v: &Tensor<f16, { [-1, -1, D] }>,
         k_cache: &mut Tensor<f16, { [1, BM_S, BLOCK_SIZE] }>,
         v_cache: &mut Tensor<f16, { [1, BM_S, BLOCK_SIZE] }>,
-        _position_start: i32, // asserted == 0 at call site; kept for ABI parity
+        position_start: i32,
         seq_len: i32,
     ) {
         let pid: (i32, i32, i32) = get_tile_block_id();
@@ -780,18 +778,18 @@ pub mod kernels {
         // Skip trailing CTAs that are entirely beyond seq_len. The
         // per-CTA tile view naturally covers absolute cache positions
         // [s_start, s_start + BM_S) so indexing is local [0, BM_S).
-        if s_start < seq_len {
+        if s_start < position_start + seq_len && s_start + BM_S > position_start {
             for s_local in 0i32..BM_S {
                 let s_global: i32 = s_start + s_local;
-                if s_global < seq_len {
+                if s_global >= position_start && s_global < position_start + seq_len {
+                    let input_row: i32 = s_global - position_start;
                     let k_tile = new_k_part
-                        .load([s_global, head, d_block])
+                        .load([input_row, head, d_block])
                         .reshape(const_shape![1, 1, BLOCK_SIZE]);
                     let v_tile = new_v_part
-                        .load([s_global, head, d_block])
+                        .load([input_row, head, d_block])
                         .reshape(const_shape![1, 1, BLOCK_SIZE]);
-                    // Local index within per-CTA tile; position_start
-                    // is assumed 0 (see function docstring).
+                    // Cache storage uses the local offset in this CTA.
                     unsafe {
                         k_cache_part.store(k_tile, [0i32, s_local, 0i32]);
                         v_cache_part.store(v_tile, [0i32, s_local, 0i32]);

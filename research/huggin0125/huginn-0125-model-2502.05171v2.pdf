@@ -1,0 +1,2116 @@
+                                                                                                               Scaling up Test-Time Compute with Latent Reasoning:
+                                                                                                                              A Recurrent Depth Approach
+
+                                                                                                               Jonas Geiping 1 Sean McLeish 2 Neel Jain 2 John Kirchenbauer 2 Siddharth Singh 2 Brian R. Bartoldson 3
+                                                                                                                                                Bhavya Kailkhura 3 Abhinav Bhatele 2 Tom Goldstein 2
+
+arXiv:2502.05171v2 [cs.LG] 17 Feb 2025                                                                                                 Abstract                                          3.6B  Scaling up Test-Time Compute with Recurrent Depth
+                                                                                                   Accuracy (%)                                                                     50
+                                                                                                                     We study a novel language model architecture                   40                          Materialized Parameters
+                                                                                                                     that is capable of scaling test-time computation by            30
+                                                                                                                     implicitly reasoning in latent space. Our model                20                          8.3B 11.5B14.6B 21.0B 33.6B 52.6B 77.9B103B
+                                                                                                                    works by iterating a recurrent block, thereby un-               10
+                                                                                                                     rolling to arbitrary depth at test-time. This stands            01           4 6 8 12 20                  ARC challenge
+                                                                                                                     in contrast to mainstream reasoning models that                                                           GSM8K CoT
+                                                                                                                     scale up compute by producing more tokens. Un-                            Test-Time Compute Recurrence    OpenBookQA
+                                                                                                                     like approaches based on chain-of-thought, our                                                          32 48 64
+                                                                                                                     approach does not require any specialized train-
+                                                                                                                     ing data, can work with small context windows,                 Figure 1: We train a 3.5B parameter language model with depth
+                                                                                                                     and can capture types of reasoning that are not                recurrence. At test time, the model can iterate longer to use more
+                                                                                                                     easily represented in words. We scale a proof-of-              compute and improve its performance. Instead of scaling test-time
+                                                                                                                     concept model to 3.5 billion parameters and 800                reasoning by “verbalizing” in long Chains-of-Thought, the model
+                                                                                                                     billion tokens. We show that the resulting model               improves entirely by reasoning in latent space. Tasks that require
+                                                                                                                     can improve its performance on reasoning bench-                less reasoning like OpenBookQA converge quicker than tasks like
+                                                                                                                     marks, sometimes dramatically, up to a compu-                  GSM8k, which effectively make use of more compute.
+                                                                                                                     tation load equivalent to 50 billion parameters.
+                                                                                                                                                                                    capability of models by scaling test time computation. The
+                                                                                                                     Model: huggingface.co/tomg-group-umd/huginn-                   mainstream approach involves post-training on long chain-
+                                                                                                                     0125                                                           of-thought examples to develop the model’s ability to ver-
+                                                                                                                     Code and Data: github.com/seal-rg/recurrent-                   balize intermediate calculations in its context window and
+                                                                                                                     pretraining                                                    thereby externalize thoughts.
+
+                                                                                                               1. Scaling by Thinking in Continuous Space                           However, the constraint that expensive internal reasoning
+                                                                                                                                                                                    must always be projected down to a single verbalized next
+                                                                                                               Humans naturally expend more mental effort solving some              token appears wasteful; it is plausible that models could
+                                                                                                               problems than others. While humans are capable of think-             be more competent if they were able to natively “think” in
+                                                                                                               ing over long time spans by verbalizing intermediate results         their continuous latent space. One way to unlock this un-
+                                                                                                               and writing them down, a substantial amount of thought               tapped dimension of additional compute involves adding a
+                                                                                                               happens through complex, recurrent firing patterns in the            recurrent unit to a model. This unit runs in a loop, itera-
+                                                                                                               brain, before the first word of an answer is uttered.                tively processing and updating its hidden state and enabling
+                                                                                                                                                                                    computations to be carried on indefinitely. While this is not
+                                                                                                               Early attempts at increasing the power of language mod-              currently the dominant paradigm, this idea is foundational
+                                                                                                               els focused on scaling model size, a practice that requires          to machine learning and has been (re-)discovered in every
+                                                                                                               extreme amounts of data and computation. More recently,              decade, for example as recurrent neural networks, diffusion
+                                                                                                               researchers have explored ways to enhance the reasoning              models, and as universal or looped transformers.
+
+                                                                                                                   1ELLIS Institute Tübingen, Max-Planck Institute for Intelli-     In this work, we show that depth-recurrent language mod-
+                                                                                                               gent Systems, Tübingen AI Center 2University of Maryland, Col-       els can learn effectively, be trained in an efficient manner,
+                                                                                                               lege Park 3Lawrence Livermore National Laboratory. Correspon-        and demonstrate significant performance improvements un-
+                                                                                                               dence to: Jonas Geiping, Tom Goldstein <jonas@tue.ellis.eu,          der the scaling of test-time compute. Our proposed trans-
+                                                                                                               tomg@umd.edu>.
+
+                                                                                                                                                                                 1
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+former architecture is built upon a latent depth-recurrent          On a more philosophical note, we hope that latent reason-
+block that is run for a randomly sampled number of itera-           ing captures facets of human reasoning that defy verbaliza-
+tions during training. We show that this paradigm can scale         tion, such as spatial thinking, physical intuition or (motor)
+to several billion parameters and over half a trillion tokens       planning. Over many iterations of the recurrent process,
+of pretraining data. At test-time, the model can improve            reasoning in a high-dimensional vector space would enable
+its performance through recurrent reasoning in latent space,        the deep exploration of multiple directions simultaneously,
+enabling it to compete with other open-source models that           instead of linear thinking, leading to a system capable of
+benefit from more parameters and training data. Addition-           exhibiting novel and complex reasoning behavior.
+ally, we show that recurrent depth models naturally support
+a number of features at inference time that require substan-        Scaling compute in this manner is not at odds with scaling
+tial tuning and research effort in non-recurrent models, such       through extended (verbalized) inference scaling (Shao et al.,
+as per-token adaptive compute, (self)-speculative decoding,         2024), or scaling parameter counts in pretraining (Kaplan
+and KV-cache sharing. We finish out our study by tracking           et al., 2020), we argue it may build a third axis on which to
+token trajectories in latent space, showing that a number           scale model performance.
+of interesting computation behaviors simply emerge with
+scale, such as the model rotating shapes in latent space for        ———————— Table of Contents ————————
+numerical computations.
+                                                                    • Section 3 introduces our latent recurrent-depth model ar-
+2. Why Train Models with Recurrent Depth?                             chitecture and training objective.
+
+Recurrent layers enable a transformer model to perform ar-          • Section 4 describes the data selection and engineering of
+bitrarily many computations before emitting a token. In               our large-scale training run on Frontier, an AMD cluster.
+principle, recurrent mechanisms provide a simple solution
+for test-time compute scaling. Compared to a more stan-             • Section 5 reports benchmark results, showing how the
+dard approach of long context reasoning (OpenAI, 2024;                model improves when scaling inference compute.
+DeepSeek-AI et al., 2025), latent recurrent thinking has sev-
+eral advantages.                                                    • Section 6 includes several application examples showing
+                                                                      how recurrent models naturally simplify LLM usecases.
+• Latent reasoning does not require construction of bespoke
+  training data. Chain-of-thought reasoning requires the            • Section 7 visualizes what computation patterns emerge at
+  model to be trained on long demonstrations that are con-            scale with this architecture and training objective, show-
+  structed in the domain of interest. In contrast, our pro-           ing that context-dependent behaviors emerge in latent
+  posed latent reasoning models can train with a variable             space, such as “orbiting” when responding to prompts
+  compute budget, using standard training data with no spe-           requiring numerical reasoning.
+  cialized demonstrations, and enhance their abilities at test-
+  time if given additional compute.                                 3. A scalable recurrent architecture
+
+• Latent reasoning models require less memory for train-            In this section we will describe our proposed architecture
+  ing and inference than chain-of-thought reasoning mod-            for a transformer with latent recurrent depth, discussing de-
+  els. Because the latter require extremely long context            sign choices and small-scale ablations. A diagram of the
+  windows, specialized training methods such as token-              architecture can be found in Figure 2. We always refer to
+  parallelization (Liu et al., 2023a) may be needed.                the sequence dimension as n, the hidden dimension of the
+                                                                    model as h, and its vocabulary as the set V .
+• Recurrent-depth networks perform more FLOPs per pa-
+  rameter than standard transformers, significantly reducing        3.1. Macroscopic Design
+  communication costs between accelerators at scale. This
+  especially enables higher device utilization when training        The model is primarily structured around decoder-only
+  with slower interconnects.                                        transformer blocks (Vaswani et al., 2017; Radford et al.,
+                                                                    2019). However these blocks are structured into three func-
+• By constructing an architecture that is compute-heavy and         tional groups, the prelude P , which embeds the input data
+  small in parameter count, we hope to set a strong prior           into a latent space using multiple transformer layers, then
+  towards models that solve problems by “thinking”, i.e. by         the core recurrent block R, which is the central unit of re-
+  learning meta-strategies, logic and abstraction, instead of       current computation modifying states s ∈ Rn×h, and fi-
+  memorizing. The strength of recurrent priors for learning         nally the coda C, which un-embeds from latent space using
+  complex algorithms has already been demonstrated in the           several layers and also contains the prediction head of the
+  “deep thinking” literature (Schwarzschild et al., 2021b;          model. The core block is set between the prelude and coda
+  Bansal et al., 2022; Schwarzschild et al., 2023).                 blocks, and by looping the core we can put an indefinite
+                                                                    amount of verses in our song.
+
+                                                                 2
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+“Hello”       Pe             e                                             e              C p “World”
+         𝒩(0,σ2In⋅h) s0                                                              sR
+                         R s1 R                                             …
+         Prelude                                                               R
+                          Recurrent                                     Coda
+                          Block                                                     Input Injection
+                                                                                    Residual Stream
+
+Figure 2: A visualization of the Architecture, as described in Section 3. Each block consists of a number of sub-layers. The blue prelude
+block embeds the inputs into latent space, where the green shared recurrent block is a block of layers that is repeated to compute the final
+latent state, which is decoded by the layers of the red coda block.
+
+Given a number of recurrent iterations r, and a sequence of             into a hidden latent space is based on empirical results ana-
+input tokens x ∈ V n these groups are used in the following             lyzing standard fixed-depth transformers (Skean et al., 2024;
+way to produce output probabilities p ∈ Rn×|V |                         Sun et al., 2024; Kaplan et al., 2024). This body of research
+                                                                        shows that the initial and the end layers of LLMs are notice-
+           e = P (x)                                                    ably different, whereas middle layers are interchangeable
+                                                                        and permutable. For example, Kaplan et al. (2024) show
+          s0 ∼ N (0, σ2In·h)                                            that within a few layers standard models already embed
+                                                                        sub-word tokens into single concepts in latent space, on
+           si = R(e, si−1) for i ∈ {1, . . . , r}                       which the model then operates.
+                                                                        Remark 3.1 (Is this a Diffusion Model?). This iterative
+           p = C(sr),                                                   architecture will look familiar to the other modern itera-
+                                                                        tive modeling paradigm, diffusion models (Song and Er-
+where σ is some standard deviation for initializing the ran-            mon, 2019), especially latent diffusion models (Rombach
+dom state. This process is shown in Figure 2. Given an                  et al., 2022). We ran several ablations with iterative
+init random state s0, the model repeatedly applies the core             schemes even more similar to diffusion models, such as
+block R, which accepts the latent state si−1 and the embed-             si = R(e, si−1) + n where n ∼ N (0, σiIn·h), but find
+ded input e and outputs a new latent state si. After finishing          the injection of noise not to help in our preliminary experi-
+all iterations, the coda block processes the last state and             ments, which is possibly connected to our training objective.
+produces the probabilities of the next token.                           We also evaluated and si = Ri(e, si−1), i.e. a core block
+                                                                        that takes the current step as input (Peebles and Xie, 2023),
+This architecture is based on deep thinking literature, where           but find that this interacts badly with path independence,
+it is shown that injecting the latent inputs e in every step            leading to models that cannot extrapolate.
+(Bansal et al., 2022) and initializing the latent vector with
+a random state stabilizes the recurrence and promotes con-              3.2. Microscopic Design
+vergence to a steady state independent of initialization, i.e.
+path independence (Anil et al., 2022).                                  Within each group, we broadly follow standard transformer
+                                                                        layer design. Each block contains multiple layers, and each
+Motivation for this Design. This recurrent design is the                layer contains a standard, causal self-attention block using
+minimal setup required to learn stable iterative operators.             RoPE (Su et al., 2021) with a base of 50000, and a gated
+A good example is gradient descent of a function E(x, y),               SiLU MLP (Shazeer, 2020). We use RMSNorm (Zhang and
+where x may be the variable of interest and y the data. Gra-            Sennrich, 2019) as our normalization function. The model
+dient descent on this function starts from an initial random            has learnable biases on queries and keys, and nowhere else.
+state, here x0, and repeatedly applies a simple operation               To stabilize the recurrence, we order all layers in the fol-
+(the gradient of the function it optimizes), that depends on            lowing “sandwich” format, using norm layers ni, which is
+the previous state xk and data y. Note that we need to use              related, but not identical to similar strategies in (Ding et al.,
+y in every step to actually optimize our function. Similarly            2021; Team Gemma et al., 2024):
+we repeatedly inject the data e in our set-up in every step of
+the recurrence. If e was provided only at the start, e.g. via                          xˆl =n2 (xl−1 + Attn(n1(xl−1)))
+s0 = e, then the iterative process would not be stable1, as                            xl =n4 (xˆl + MLP(n3(xˆl)))
+its solution would depend only on its boundary conditions.
+                                                                        While at small scales, most normalization strategies, e.g.
+The structure of using several layers to embed input tokens             pre-norm, post-norm and others, work almost equally well,
+
+    1Stable in the sense that R cannot be a monotone operator if it
+does not depend on e, and so cannot represent gradient descent on
+strictly convex, data-dependent functions, (Bauschke et al., 2011)
+
+                                                                     3
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+we ablate these options and find that this normalization is                   0.03
+required to train the recurrence at scale2.
+                                                                     Density  0.02
+Given an embedding matrix E and embedding scale γ, the
+prelude block first embeds input tokens x as γE(x), and                       0.01
+then to applies lP many prelude layers with the layout de-
+scribed above.                                                                0.00
+                                                                                  0 25 50 75 100 125 150
+Our core recurrent block R starts with an adapter matrix                                           Sampled r
+A : R2h → Rh mapping the concatenation of si and e
+into the hidden dimension h (Bansal et al., 2022). While                            Density      Median = 29.0
+re-incorporation of initial embedding features via addition
+rather than concatenation works equally well for smaller                            Mean = 33.0  Mode = 24.0
+models, we find that concatenation works best at scale. This
+is then fed into lR transformer layers. At the end of the core       Figure 3: We use a log-normal Poisson Distribution to sample the
+block the output is again rescaled with an RMSNorm nc.               number of recurrent iterations for each training step.
+
+The coda contains lC layers, normalization by nc, and pro-           given the normal distribution N and Poisson distribution P,
+jection into the vocabulary using tied embeddings ET .               see Figure 3. The distribution most often samples values
+                                                                     less than r¯, but it contains a heavy tail of occasional events
+In summary, we can summarize the architecture by the                 in which significantly more iterations are taken.
+triplet (lP , lR, lC ), describing the number of layers in each
+stage, and by the number of recurrences r, which may vary            Truncated Backpropagation. To keep computation and
+in each forward pass. We train a number of small-scale               memory low at train time, we backpropagate through only
+models with shape (1, 4, 1) and hidden size h = 1024, in             the last k iterations of the recurrent unit. This enables us to
+addition to a large model with shape (2, 4, 2) and h = 5280.         train with the heavy-tailed Poisson distribution Λ, as max-
+This model has only 8 “real” layers, but when the recurrent          imum activation memory and backward compute is now
+block is iterated, e.g. 32 times, it unfolds to an effective         independent of r. We fix k = 8 in our main experiments.
+depth of 2 + 4r + 2 = 132 layers, constructing computation           At small scale, this works as well as sampling k uniformly,
+chains that can be deeper than even the largest fixed-depth          but with set fixed, the overall memory usage in each step of
+transformers (Levine et al., 2021; Merrill et al., 2022).            training is equal. Note that the prelude block still receives
+                                                                     gradient updates in every step, as its output e is injected in
+3.3. Training Objective                                              every step. This setup resembles truncated backpropagation
+                                                                     through time, as commonly done with RNNs, although our
+Training Recurrent Models through Unrolling. To en-                  setup is recurrent in depth rather than time (Williams and
+sure that the model can function when we scale up recurrent          Peng, 1990; Mikolov et al., 2011).
+iterations at test-time, we randomly sample iteration counts
+during training, assigning a random number of iterations r           4. Training a large-scale recurrent-depth
+to every input sequence (Schwarzschild et al., 2021b). We               Language Model
+optimize the expectation of the loss function L over random
+samples x from distribution X and random iteration counts            After verifying that we can reliably train small test models
+r from distribution Λ.                                               up to 10B tokens, we move on to larger-scale runs. Given
+                                                                     our limited compute budget, we could either train multiple
+L(θ) = Ex∈X Er∼ΛL (mθ(x, r), x′) .                                   tiny models too small to show emergent effects or scaling,
+                                                                     or train a single medium-scale model. Based on this, we
+Here, m represents the model output, and x′ is the sequence          prepared for a single run, which we detail below.
+x shifted left, i.e., the next tokens in the sequence x. We
+choose Λ to be a log-normal Poisson distribution. Given a            4.1. Training Setup
+targeted mean recurrence r¯ + 1 and a variance that we set
+to σ = 12 , we can sample from this distribution via                 We describe the training setup, separated into architecture,
+                                                                     optimization setup and pretraining data. We publicly re-
+τ ∼ N (log(r¯) − 1 σ2, σ) (1)                                        lease all training data, pretraining code, and a selection of
+                     2                                               intermediate model checkpoints.
+
+r ∼ P(eτ ) + 1,                     (2)                              Pretraining Data. Given access to only enough compute
+                                                                     for a single large scale model run, we opted for a dataset
+    2Note also that technically n3 is superfluous, but we report     mixture that maximized the potential for emergent reason-
+here the exact norm setup with which we trained the final model.     ing behaviors, not necessarily for optimal benchmark per-
+
+                                                                  4
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                                                   generic-text: 28.71%        However, at larger scales, we use the initialization of Takase
+                                                   code: 25.36%                et al. (2024) which prescribes a variance of σ2h = 5h2 . We
+                                                   scientific-text: 18.73%     initialize all parameters from a truncated normal distribu-
+                                                   synthetic-text: 8.14%
+                                                   longform-text: 7.50%        tion (truncated at 3σ) with this variance, except all out-
+                                                   math: 6.14%
+                                                   generic-instruct: 2.09%     projection layers, where the variance is set to σ2out = 5hl 1 ,
+                                                   Q&A-text: 1.58%             for l = lP + r¯lR + lC the number of effective layers, which
+                                                   math-instruct: 1.51%
+                                                   writing-instruct: 0.12%     is 132 for this model. As a result, the out-projection layers
+                                                   misc-reasoning: 0.11%
+                                                                               are initialized with fairly small values (Goyal et al√., 2018).
+Figure 4: Distribution of data sources that are included during                The output of the embedding layer is scaled by h. To
+training. The majority of our data is comprised of generic web-
+text, scientific writing and code.                                             match this initialization, the state s0 is also sampled from a
+
+formance. Our final mixture is heavily skewed towards                          truncated  normal  distribution,  here  with  variance  σ2   =  25 .
+code and mathematical reasoning data with (hopefully) just
+enough general webtext to allow the model to acquire stan-                                                                               s
+dard language modeling abilities. All sources are publicly
+available. We provide an overview in Figure 4. Following                       Locked-Step Sampling. To enable synchronization be-
+Allen-Zhu and Li (2024), we directly mix relevant instruc-                     tween parallel workers, we sample a single depth r for each
+tion data into the pretraining data. However, due to compute                   micro-batch of training, which we synchronize across work-
+and time constraints, we were not able to ablate this mixture.                 ers (otherwise workers would idle while waiting for the
+We expect that a more careful data preparation could further                   model with the largest r to complete its backward pass).
+improve the model’s performance. We list all data sources                      We verify at small scale that this modification improves
+in Appendix C.                                                                 compute utilization without impacting convergence speed,
+                                                                               but note that at large batch sizes, training could be further
+Tokenization and Packing Details. We construct a vo-                           improved by optimally sampling and scheduling indepen-
+cabulary of 65536 tokens via BPE (Sennrich et al., 2016),                      dent steps r on each worker, to more faithfully model the
+using the implementation of Dagan (2024). In compari-                          expectation over steps in Equation (1).
+son to conventional tokenizer training, we construct our tok-
+enizer directly on the instruction data split of our pretraining               Optimizer and Learning Rate Schedule. We train using
+corpus, to maximize tokenization efficiency on the target                      the Adam optimizer with decoupled weight regularization
+domain. We also substantially modify the pre-tokenization                      (β1 = 0.9, β2 = 0.95, η = 5 × 10−4) (Kingma and Ba,
+regex (e.g. of Dagan et al. (2024)) to better support code,                    2015; Loshchilov and Hutter, 2017), modified to include
+contractions and LaTeX. We include a <|begin_text|>                            update clipping (Wortsman et al., 2023b) and removal of
+token at the start of every document. After tokenizing our                     the ε constant as in Everett et al. (2024). We clip gradients
+pretraining corpus, we pack our tokenized documents into                       above 1. We train with warm-up and a constant learning rate
+sequences of length 4096. When packing, we discard doc-                        (Zhai et al., 2022; Geiping and Goldstein, 2023), warming
+ument ends that would otherwise lack previous context, to                      up to our maximal learning rate within the first 4096 steps.
+fix an issue described as the “grounding problem” in Ding
+et al. (2024), aside from several long-document sources of                     4.2. Compute Setup and Hardware
+mathematical content, which we preserve in their entirety.
+                                                                               We train this model using compute time allocated on the
+Architecture and Initialization. We scale the architec-                        Oak Ridge National Laboratory’s Frontier supercomputer.
+ture described in Section 3, setting the layers to (2, 4, 2),                  This HPE Cray system contains 9408 compute nodes with
+and train with a mean recurrence value of r¯ = 32. We                          AMD MI250X GPUs, connected via 4xHPE Slingshot-
+mainly scale by increasing the hidden size to h = 5280,                        11 NICs. The scheduling system is orchestrated through
+which yields 55 heads of size of 96. The MLP inner dimen-                      SLURM. We train in bfloat16 mixed precision using a
+sion is 17920 and the RMSNorm ε is 10−6. Overall this                          PyTorch-based implementation (Zamirai et al., 2021).
+model shape has about 1.5B parameters in non-recurrent
+prelude and head, 1.5B parameters in the core recurrent                        Device Speed and Parallelization Strategy. Nominally,
+block, and 0.5B in the tied input embedding.                                   each MI250X chip3 achieves 192 TFLOP per GPU (AMD,
+                                                                               2021). For a single matrix multiplication, we measure a
+At small scales, most sensible initialization schemes work.                    maximum achievable speed on these GPUs of 125 TFLOP/s
+                                                                               on our software stack (ROCM 6.2.0, PyTorch 2.6 pre-
+                                                                               release 11/02) (Bekman, 2023). Our implementation, using
+                                                                               extensive PyTorch compilation and optimization of the hid-
+                                                                               den dimension to h = 5280 achieves a single-node training
+
+                                                                                   3Technically, each node contains 4 dual-chip MI250X cards,
+                                                                               but its main software stack (ROCm runtime) treats these chips as
+                                                                               fully independent.
+
+                                                                            5
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                              100                                                   103                     Recurrence
+                                                                                    102                            1
+                              10 1                                                  101                            4
+                                    101 102 103 104                                                                8
+                                       Optimizer Step                                             103              16
+Loss (log)                                                                                  Optimizer Step         32
+                               Hidden State                                                                        64
+                                  Corr. (log)
+                                                                     Val PPL (log)
+101
+     101 102 103 104
+        Optimizer Step
+
+                        Main  Bad Run 1                           Bad Run 2
+
+Figure 5: Plots of the initial 10000 steps for the first two failed attempts and the final, successful run (“Main”). Note the hidden state
+collapse (middle) and collapse of the recurrence (right) in the first two failed runs, underlining the importance of our architecture and
+initialization in inducing a recurrent model and explain the underperformance of these runs in terms of pretraining loss (left).
+
+speed of 108.75 TFLOP/s, i.e. 87% AFU (“Achievable Flop           this run (“Bad Run 1”, orange), quickly stalled.
+Utilization”). Due to the weight sharing inherent in our re-
+current design, even our largest model is still small enough      While the run obviously stopped improving in training loss
+to be trained using only data (not tensor) parallelism, with      (left plot), we find that this stall is due to the model’s rep-
+only optimizer sharding (Rajbhandari et al., 2020) and gra-       resentation collapsing (Noci et al., 2022). The correlation
+dient checkpointing on a per-iteration granularity. With a        of hidden states in the token dimension quickly goes to 1.0
+batch size of 1 per GPU we end up with a global batch size        (middle plot), meaning the model predicts the same hidden
+of 16M tokens per step, minimizing inter-GPU communica-           state for every token in the sequence. We find that this is
+tion bandwidth.                                                   an initialization issue that arises due to the recurrence op-
+                                                                  eration. Every iteration of the recurrence block increases
+When we run at scale on 4096 GPUs, we achieve 52-64               token correlation, mixing the sequence until collapse.
+TFLOP/s per GPU, i.e. 41%-51% AFU, or 1-1.2M tokens
+per second. To achieve this, we wrote a hand-crafted dis-         We attempt to fix this by introducing the embedding scale
+tributed data parallel implementation to circumvent a crit-       factor, switching back to a conventional pre-normalization
+ical AMD interconnect issue, which we describe in more            block, and switching to the learned adapter. Initially, these
+detail in Appendix A.2. Overall, we believe this may be the       changes appear to remedy the issue. Even though token cor-
+largest language model training run to completion in terms        relation shoots close to 1.0 at the start (“Bad Run 2”, green),
+of number of devices used in parallel on an AMD cluster,          the model recovers after the first 150 steps. However, we
+as of time of writing.                                            quickly find that this training run is not able to leverage
+                                                                  test-time compute effectively (right plot), as validation per-
+Training Timeline. Training proceeded through 21 seg-             plexity is the same whether 1 or 32 recurrences are used.
+ments of up to 12 hours, which scheduled on Frontier mostly       This initialization and norm setup has led to a local mini-
+in early December 2024. We also ran a baseline comparison,        mum as the model has learned early to ignore the incoming
+where we train the same architecture but in a feedforward         state s, preventing further improvements.
+manner with only 1 pass through the core/recurrent block.
+This trained with the same setup for 180B tokens on 256           In a third, and final run (“Main”, blue), we fix this issue
+nodes with a batch size of 2 per GPU. Ultimately, we were         by reverting back to the sandwich block format, and fur-
+able to schedule 795B tokens of pretraining of the main           ther dropping the peak learning rate to 4 × 10−5. This run
+model. Due to our constant learning rate schedule, we were        starts smoothly, never reaches a token correlation close to
+able to add additional segments “on-demand”, when an al-          1.0, and quickly overtakes the previous run by utilizing the
+location happened to be available.                                recurrence and improving with more iterations.
+
+4.3. Importance of Norms and Initializations at Scale             With our successful configuration, training continues
+                                                                  smoothly for the next 750B tokens without notable inter-
+At small scales all normalization strategies worked, and we       ruptions or loss spikes. We plot training loss and perplexity
+observed only tiny differences between initializations. The       at different recurrence steps in Figure 6. In our material, we
+same was not true at scale. The first training run we started     refer to the final checkpoint of this run as our “main model”,
+was set up with the same block sandwich structure as de-          which we denote as Huginn-01254.
+scribed above, but parameter-free RMSNorm layers, no em-
+bedding scale γ, a parameter-free adapter A(s, e) = s + e,            4/hu: gIn/, transl. “thought”, is a raven depicted in Norse
+and a peak learning rate of 4 × 10−4. As shown in Figure 5,       mythology. Corvids are surprisingly intelligent for their size, and
+                                                                  and of course, as birds, able to unfold their wings at test-time.
+
+                                                               6
+                Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                  Tokens (log)                                                                      Tokens (log)
+   108 109 1010 1011 1012                                                                     1010 1011 1012
+Loss
+                                                      Validation Perplexity (log)
+10 103 Recurrence
+                                                                                                                  1
+
+                                                                                                                           4
+
+                                                                                   102                                     8
+
+5                                                                                                                          16
+
+                                                                                   10 64 1 32
+
+   101 102 103 104                                                                 102 103 104
+                 Step (log)                                                                           Step (log)
+
+Figure 6: Left: Plot of pretrain loss over the 800B tokens on the main run. Right: Plot of val ppl at recurrent depths 1, 4, 8, 16, 32, 64.
+
+During training, the model improves in perplexity on all levels of recurrence.
+
+Table 1: Results on lm-eval-harness tasks zero-shot across various open-source models. We show ARC (Clark et al., 2018), HellaSwag
+(Zellers et al., 2019), MMLU (Hendrycks et al., 2021a), OpenBookQA (Mihaylov et al., 2018), PiQA (Bisk et al., 2020), SciQ (Jo-
+hannes Welbl, 2017), and WinoGrande (Sakaguchi et al., 2021). We report normalized accuracy when provided.
+
+Model           Param  Tokens  ARC-E   ARC-C                                       HellaSwag  MMLU    OBQA   PiQA   SciQ   WinoGrande
+
+random            7B    1.2T    25.0    25.0                                          25.0      25.0   25.0  50.0   25.0        50.0
+                2.8B    0.3T
+Amber           6.9B    0.3T    65.70   37.20                                         72.54    26.77  41.00  78.73  88.50      63.22
+Pythia-2.8b      12B    0.3T    58.00   32.51                                         59.17    25.05  35.40  73.29  83.60      57.85
+Pythia-6.9b       1B     3T     60.48   34.64                                         63.32    25.74  37.20  75.79  82.90      61.40
+Pythia-12b        7B    2.5T    63.22   34.64                                         66.72    24.01  35.40  75.84  84.40      63.06
+OLMo-1B           7B   2.05T    57.28   30.72                                         63.00    24.33  36.40  75.24  78.70      59.19
+OLMo-7B           7B   2.75T    68.81   40.27                                         75.52    28.39  42.20  80.03  88.50      67.09
+OLMo-7B-0424      7B     4T     75.13   45.05                                         77.24    47.46  41.60  80.09  96.00      68.19
+OLMo-7B-0724                    74.28   43.43                                         77.76    50.18  41.60  80.69  95.70      67.17
+OLMo-2-1124     3.5B    0.8T    82.79   57.42                                         80.50    60.56  46.20  81.18  96.40      74.74
+                3.5B    0.8T
+Ours, (r = 4)   3.5B    0.8T    49.07   27.99                                         43.46    23.39  28.20  64.96  80.00      55.24
+Ours, (r = 8)   3.5B    0.8T    65.11   35.15                                         58.54    25.29  35.40  73.45  92.10      55.64
+Ours, (r = 16)                  69.49   37.71                                         64.67    31.25  37.60  75.79  93.90      57.77
+Ours, (r = 32)                  69.91   38.23                                         65.21    31.38  38.80  76.22  93.50      59.43
+
+5. Benchmark Results                                                                       continuously improve in performance with test-time scaling
+                                                                                           up to FLOP budgets equivalent to a standard 50B parame-
+We train our final model for 800B tokens, and a non-                                       ter fixed-depth transformer. It is also important to note a
+recurrent baseline for 180B tokens. We evaluate these                                      few caveats of the main training run when interpreting the
+checkpoints against other open-source models trained                                       results. First, our main checkpoint is trained for only 47000
+on fully public datasets (like ours) of a similar size.                                    steps on a broadly untested mixture, and the learning rate is
+We compare against Amber (Liu et al., 2023c), Pythia                                       never cooled down from its peak. As an academic project,
+(Biderman et al., 2023) and a number of OLMo 1&2                                           the model is trained only on publicly available data and the
+variants (Groeneveld et al., 2024; AI2, 2024; Team OLMo                                    800B token count, while large in comparison to older fully
+et al., 2025). We execute all standard benchmarks through                                  open-source models such as the Pythia series, is small in
+the lm-eval harness (Biderman et al., 2024) and code                                       comparison to modern open-source efforts such as OLMo,
+benchmarks via bigcode-bench (Zhuo et al., 2024).                                          and tiny in comparison to the datasets used to train indus-
+                                                                                           trial open-weight models.
+5.1. Standard Benchmarks
+                                                                                           Disclaimers aside, we collect results for established bench-
+Overall, it is not straightforward to place our model in direct                            mark tasks (Team OLMo et al., 2025) in Table 1 and
+comparison to other large language models, all of which are                                show all models side-by-side. In direct comparison we see
+small variations of the fixed-depth transformer architecture.                              that our model outperforms the older Pythia series and is
+While our model has only 3.5B parameters and hence re-                                     roughly comparable to the first OLMo generation, OLMo-
+quires only modest interconnect bandwidth during pretrain-                                 7B in most metrics, but lags behind the later OLMo mod-
+ing, it chews through raw FLOPs close to what a 32B param-                                 els trained larger, more carefully curated datasets. For the
+eter transformer would consume during pretraining, and can                                 first recurrent-depth model for language to be trained at this
+
+                                                                                        7
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Table 2: Benchmarks of mathematical reasoning and understanding. We report    Table 3: Evaluation on code benchmarks, MBPP and
+flexible and strict extract for GSM8K and GSM8K CoT, extract match for Min-   HumanEval. We report pass@1 for both datasets.
+erva Math, and acc norm. for MathQA.
+
+Model                           GSM8K      GSM8k CoT    Minerva MATH  MathQA               Model           Param         Tokens  MBPP   HumanEval
+
+Random                            0.00          0.00           0.00    20.00               Random            3B           3.3T    0.00      0.00
+                                                                                                             7B           3.7T
+Amber                          3.94/4.32     3.34/5.16         1.94    25.26               starcoder2-3b                         43.00     31.09
+Pythia-2.8b                    1.59/2.12     1.90/2.81         1.96    24.52               starcoder2-7b     7B           1.2T   43.80     31.70
+Pythia-6.9b                    2.05/2.43     2.81/2.88         1.38    25.96                               2.8B           0.3T
+Pythia-12b                     3.49/4.62     3.34/4.62         2.56    25.80               Amber           6.9B           0.3T   19.60     13.41
+OLMo-1B                        1.82/2.27     1.59/2.58         1.60    23.38               Pythia-2.8b      12B           0.3T    6.70      7.92
+OLMo-7B                        4.02/4.09     6.07/7.28         2.12    25.26               Pythia-6.9b       1B            3T     7.92      5.60
+OLMo-7B-0424                  27.07/27.29  26.23/26.23         5.56    28.48               Pythia-12b        7B           2.5T    5.60      9.14
+OLMo-7B-0724                  28.66/28.73  28.89/28.89         5.62    27.84               OLMo-1B           7B          2.05T    0.00      4.87
+OLMo-2-1124-7B                66.72/66.79  61.94/66.19        19.08    37.59               OLMo-7B           7B          2.75T    15.6     12.80
+                                                                                           OLMo-7B-0424      7B            4T    21.20     16.46
+Our w/o sys. prompt (r = 32)  28.05/28.20  32.60/34.57        12.58    26.60               OLMo-7B-0724                          25.60     20.12
+Our w/ sys. prompt (r = 32)   24.87/38.13  34.80/42.08        11.24    27.97               OLMo-2-1124-7B  3.5B           0.8T   21.80     10.36
+
+                                                                                           Ours (r = 32)                         24.80     23.17
+
+scale, and considering the limitations of the training run, we                                       HellaSwag           GSM8K CoT (Flexible)
+find these results promising and certainly suggestive that                                           GSM8K CoT (Strict)  Humaneval
+further research into latent recurrence as an approach to
+test-time scaling is warranted.                                                            80
+
+                                                                                           60
+
+5.2. Math and Coding Benchmarks                                                     40Performance
+
+We also evaluate the model on math and coding. For math,                            20
+we evaluate GSM8k (Cobbe et al., 2021) (as zero-shot and
+in the 8-way CoT setup), MATH ((Hendrycks et al., 2021b)                             01 4 8 16 32 64
+with the Minerva evaluation rules (Lewkowycz et al., 2022))                                      Recurrence at Test-Time
+and MathQA (Amini et al., 2019). For coding, we check
+MBPP (Austin et al., 2021) and HumanEval (Chen et al.,                   Figure 7: Performance on GSM8K CoT (strict match and flexible
+2021). Here we find that our model significantly surpasses               match), HellaSwag (acc norm.), and HumanEval (pass@1). As
+all models except the latest OLMo-2 model in mathematical                we increase compute, the performance on these benchmarks in-
+reasoning, as measured on GSM8k and MATH. On coding                      creases. HellaSwag only needs 8 recurrences to achieve near peak
+benchmarks the model beats all other general-purpose open-               performance while other benchmarks make use of more compute.
+source models, although it does not outperform dedicated
+code models, such as StarCoder2 (Lozhkov et al., 2024),                  process. We also note that the recurrent model, when eval-
+trained for several trillion tokens. We also note that while             uated with only a single recurrence, effectively stops im-
+further improvements in language modeling are slowing                    proving between the early 180B checkpoint and the 800B
+down, as expected at this training scale, both code and math-            checkpoint, showing that further improvements are not built
+ematical reasoning continue to improve steadily throughout               into the prelude or coda non-recurrent layers but encoded
+training, see Figure 8.                                                  entirely into the iterations of the recurrent block.
+
+5.3. Where does recurrence help most?                                    Further, we chart the improvement as a function of test-time
+                                                                         compute on several of these tasks for the main model in Fig-
+How much of this performance can we attribute to recur-                  ure 7. We find that saturation is highly task-dependent, on
+rence, and how much to other factors, such as dataset, tok-              easier tasks the model saturates quicker, whereas it benefits
+enization and architectural choices? In Table 4, we compare              from more compute on others.
+our recurrent model against its non-recurrent twin, which
+we trained to 180B tokens in the exact same setting. In di-              Recurrence and Context We evaluate ARC-C perfor-
+rect comparison of both models at 180B tokens, we see that               mance as a function of recurrence and number of few-shot
+the recurrent model outperforms its baseline with an espe-               examples in the context in Figure 9. Interestingly, without
+cially pronounced advantage on harder tasks, such as the                 few-shot examples to consider, the model saturates in com-
+ARC challenge set. On other tasks, such as SciQ, which                   pute around 8-12 iterations. However, when more context is
+requires straightforward recall of scientific facts, perfor-             given, the model can reason about more information in con-
+mance of the models is more similar. We observe that gains               text, which it does, saturating around 20 iterations if 1 ex-
+through reasoning are especially prominent on GSM8k,                     ample is provided, and 32 iterations, if 25-50 examples are
+where the 180B recurrent model is already 5 times better                 provided, mirroring generalization improvements shown for
+than the baseline at this early snapshot in the pretraining              recurrence (Yang et al., 2024a; Fan et al., 2025). Similarly,
+
+                                                                      8
+                                            Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Table 4: Baseline comparison, recurrent versus non-recurrent model trained in the same training setup and data. Comparing the recurrent
+model with its non-recurrent baseline, we see that even at 180B tokens, the recurrent substantially outperforms on harder tasks.
+
+Model                                               Tokens ARC-E ARC-C HellaSwag MMLU OBQA PiQA SciQ WinoGrande GSM8K CoT
+
+Fixed-Depth Baseline                                0.18T 46.42 26.96                           37.34          24.16 29.60 64.47 73.20                51.78     1.82/2.20
+
+Ours, early ckpt, (r = 32)                          0.18T  53.62                  29.18         48.80          25.59  31.40              68.88 80.60  52.88   9.02/10.24
+Ours, early ckpt, (r = 1)                           0.18T  34.01                  23.72         29.19          23.47  25.60              53.26 54.10  53.75   0.00/0.15
+
+Ours, (r = 32)                                      0.8T 69.91 38.23                            65.21          31.38  38.80              76.22 93.50  59.43   34.80/42.08
+Ours, (r = 1)                                       0.8T 34.89 24.06                            29.34          23.60  26.80              55.33 47.10  49.41    0.00/0.00
+
+                                     1 Rec  8 Rec          32 Rec                        1 Rec         8 Rec          32 Rec             1 Rec        8 Rec     32 Rec
+
+                                     4 Rec  16 Rec         64 Rec                        4 Rec         16 Rec         64 Rec             4 Rec        16 Rec    64 Rec
+
+                            35                                                65
+
+                            30                                                60                                                         20
+                                                                                                                                         15
+GSM8K CoT                   25                                     HellaSwag  55                                              HumanEval  10
+                                                                                                                                          5
+                            20                                                50                                                          0
+
+                            15                                                45                                                          100 200 300 400 500 600 700 800
+                                                                                                                                                     Tokens Trained (Billion)
+                                                                              40
+
+                            10                                                35
+
+                            5                                                 30
+
+                            0                                                 25
+                            100 200 300 400 500 600 700 800                    100 200 300 400 500 600 700 800
+                                                                                          Tokens Trained (Billion)
+                                       Tokens Trained (Billion)
+
+Figure 8: GSM8K CoT, HellaSwag, and HumanEval performance over the training tokens with different recurrences at test-time. We
+
+evaluate GSM8K CoT with chat template and 8-way few shot as multiturn. HellaSwag and HumanEval are zero-shot with no chat
+
+template. Model performance on harder tasks grows almost linearly with the training budget, if provided sufficient test-time compute.
+
+                                      Scaling up Test-Time Compute with Recurrent Depth                   Table 5: Comparison of Open and Closed QA Performance (%)
+                                                                                                          (Mihaylov et al., 2018). In the open exam, a relevant fact is pro-
+                            45
+
+ARC Challenge Accuracy (%)  40                                                                            vided before the question is asked. In this setting, our smaller
+
+                                                                                                          model closes the gap to other open-source models, indicating that
+
+                            35                                                                            the model is capable, but has fewer facts memorized.
+
+                            30                 4 6 8 12 20                                 0-shot                     Model              Closed       Open      ∆
+                            25                                                             1-shot
+                            20              Test-Time Compute Recurrence                   5-shot                     Amber               41.0        46.0    +5.0
+                                                                                           25-shot                    Pythia-2.8b         35.4        44.8    +9.4
+                                  1                                                        50-shot                    Pythia-6.9b         37.2        44.2    +7.0
+                                                                                  32 48 64                            Pythia-12b          35.4        48.0    +12.6
+                                                                                                                      OLMo-1B             36.4        43.6    +7.2
+Figure 9: The saturation point in un-normalized accuracy via test-                                                    OLMo-7B             42.2        49.8    +7.6
+time recurrence on the ARC challenge set is correlated with the                                                       OLMo-7B-0424        41.6        50.6    +9.0
+number of few-shot examples. The model uses more recurrence to                                                        OLMo-7B-0724        41.6        53.2    +11.6
+extract more information from the additional few-shot examples,                                                       OLMo-2-1124         46.2        53.4    +7.2
+making use of more compute if more context is given.
+                                                                                                                      Ours (r = 32)       38.2        49.2    +11.0
+
+we see that if we re-evaluate OBQA in Table 5, but do not                                                 tial moving average starting from our last checkpoint with
+run the benchmark in the default lm-eval "closed-book" for-                                               β = 0.9, incorporating the last 75 checkpoints with a di-
+mat and rather provide a relevant fact, our recurrent model                                               lation factor of 7, a modification to established protocols
+improves significantly almost closing the gap to OLMo-2.                                                  (Kaddour, 2022; Sanyal et al., 2024). We provide this EMA
+Intuitively this makes sense, as the recurrent models has                                                 model as well, which further improves GMS8k performance
+less capacity to memorize facts but more capacity to reason                                               to 47.23% flexible (38.59% strict), when tested at r = 64.
+about its context.
+                                                                                                          6. Recurrent Depth simplifies LLMs
+5.4. Improvements through Weight Averaging
+                                                                                                          Aside from encouraging performance in mathematical and
+Due to our constant learning rate, we can materialize further                                             code reasoning, recurrent-depth models turn out to be sur-
+improvements through weight averaging (Izmailov et al.,                                                   prisingly natural tools to support a number of methods that
+2018) to simulate the result of a cooldown (Hägele et al.,                                                require substantial effort with standard transformers. In the
+2024; DeepSeek-AI et al., 2024). We use an exponen-                                                       next section, we provide a non-exhaustive overview.
+
+                                                                                                       9
+                 Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+         0.08    high school mathematics                                 philosophy                logical fallacies            moral scenarios
+         0.07
+         0.06                            Default ( =12.7)    Default ( =14.6)            Default ( =15.6)             Default ( =16.2)
+         0.05                            Cont. CoT ( =11.9)  Cont. CoT ( =13.5)          Cont. CoT ( =14.4)           Cont. CoT ( =16.0)
+         0.04
+Density  0.03
+         0.02
+         0.01    5 10 15 20 25 30 0 5 10 15 20 25 30 0 5 10 15 20 25 30 0 5 10 15 20 25 30
+         0.00 0
+                                                                             Steps to KL-based Threshold
+
+Figure 10: Histograms of zero-shot, per-token adaptive exits based on KL difference between steps for questions from MMLU categories,
+with and without zero-shot continuous CoT. The mean of each distribution is given in the legends. The exit threshold is fixed to 5 × 10−4.
+
+We see that the model converges quicker on high school mathematics than tasks such as logical fallacies or moral scenarios. On some
+
+tasks, such as philosophy, the model is able to effectively re-use states in its latent CoT and converge quickly on a subset of tokens,
+
+leading to fewer steps required overall.
+
+6.1. Zero-Shot Adaptive Compute at Test-Time                                             the benefit of early stopping. Instead, as in Elbayad et al.
+                                                                                         (2019), we attend to the last, deepest available KV states in
+We have shown that the model is capable of varying com-                                  the cache. Because all recurrent KV cache entries are gener-
+pute on a per-query level, running the model in different                                ated by the same K,V projection matrices from successive
+recurrence modes. This is after all also how the model is                                hidden states, they “match”, and therefore the model is able
+trained, as in Equation (1). However, it would be more                                   to attend to the latest cache entry from every previous token,
+efficient in practice to stop recurring early when predic-                               even if computed at different recurrent depths.
+tions are easy, and only spend compute on hard decisions.
+Other work, especially when based on standard transform-                                 6.2. Zero-Shot KV-cache Sharing
+ers, requires models trained specifically for early exits (El-
+bayad et al., 2019; Fan et al., 2019; Banino et al., 2021), or                           A different avenue to increase efficiency is to reduce the
+models finetuned with exit heads on every layer (Schuster                                memory footprint of the KV-cache by sharing the cache
+et al., 2022). To test our model’s zero-shot exit abilities, we                          between layers (character.ai, 2024; Brandon et al., 2024).
+choose a simple exit criterion to evaluate convergence, the                              Typically, transformers must be trained from scratch with
+KL-divergence between two successive steps. If this diver-                               this capability. However, as discussed in the previous sec-
+gence falls below 5 × 10−4, we stop iterating, sample the                                tion, we find that we can simply share KV-caches in our
+output token, and move to generate the next token.                                       model with minimal impact to performance. We set a fixed
+                                                                                         KV-cache budget for the recurrence at every token k, and
+We show this zero-shot per-token adaptive compute behav-                                 at iteration i, read and write the cache entry i mod k. For
+ior in Figure 10, where we plot the distribution of steps                                example, we set a maximum KV-cache budget of 16 steps,
+taken before the exit condition is hit. We do this for the first                         overwriting the KV-cache of the 1st step when executing
+50 questions from different MMLU categories, asked in                                    the 17th step, and so forth. This can be used on its own to
+free-form chat. Interestingly, the number of steps required                              reduce KV cache memory, or in combination with per-token
+to exit differs notably between categories, with the model                               adaptive compute as discussed above. On MTBench, this
+exiting earlier on high school mathematics, but taking on av-                            does not reduce performance (cache budget of 4: 5.86, see
+erage 3.5 steps more on moral scenarios. As a preliminary                                Appendix Table 6).
+demonstration, we verify on MTBench that this adaptivity
+does not significantly impact performance in a conversa-                                 6.3. Zero-Shot Continuous Chain-of-Thought
+tional benchmark setting (standard: 5.63, early exits: 5.56
+see Appendix Table 6).                                                                   By attending to the output of later steps of previous tokens
+                                                                                         in the early steps of current tokens, as described in the
+Remark 6.1 (What about missing KV-cache entries?). Tra-                                  KV-cache sharing section, we actually construct a compu-
+ditionally, a concern with token-wise early exits for models                             tation that is deeper than the current number of recurrence
+with self-attention is that it breaks KV-caching in a funda-                             steps. However, we can also construct deeper computational
+mental way. On each recurrent step, a token needs to attend                              graphs more explicitly. Instead of sampling a random ini-
+to the KV state of previous tokens in the sequence, but these                            tial state s0 at every generation step, we can warm-start
+activations may not have been computed due to an early exit.                             with the last state sr from the previous token. This way, the
+A naïve fix would be to pause generating and recompute                                   model can benefit from latent information encoded at the
+all missing hidden states, but this would remove some of
+
+                                                                                     10
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Figure 11: Convergence of latent states for every token in a sequence (going top to bottom) and latent iterations (going left to right),
+plotting the distance a final iterate s∗, which we set with r = 128. Shown is an unsafe question posed to the model. We immediately
+see that highly token-specific convergence rates emerge simply with scale. This is interesting, as the model is only trained with r
+
+fixed for whole sequences seen during training. We see that convergence is especially slow on the key part of the question, really
+
+wrong-ed.We further see that the model also learns different behaviors, we see an oscillating pattern in latent space, here most notably
+
+for the school token. Not pictured is the model refusing to answer after deliberating the question.
+
+previous generation step, and further improve. As shown in         With standard transformer models, speculative decoding re-
+Figure 10, this reduces the average number of steps required       quires an external draft model, Medusa heads (Cai et al.,
+to converge by 1-2. On tasks such as philosophy, we see            2024), or early-exit adaptation (Zhang et al., 2024b; El-
+that the exit distribution shifts noticeably, with the model       houshi et al., 2024). Zhang et al. (2024b) implement self-
+more often exiting early by recycling previous compute.            speculative decoding simply through layer skipping, but this
+                                                                   does not always result in good draft quality. In compari-
+This is closely related to the continuous chain of thought         son, our model can naturally be run with fewer iterations to
+approach explored in (Hao et al., 2024), in the sense that it      draft the next N tokens in the generated sequence, which
+is an intervention to the trained model to add additional re-      can then be verified with any desired number of iterations
+currence. To achieve a similar behavior in fixed-depth trans-      M > N later. This can also be staggered across multiple
+formers, Hao et al. (2024) train models on reasoning chains        draft stages, or the draft model can use adaptive compute as
+to accept their last hidden state as alternative inputs when       in Section 6.1. Drafting with this model is also efficient, as
+computing the next token. Finetuning in this manner trans-         the states computed during drafting are not wasted and can
+forms these models also into limited depth-recurrent models        be re-used when verifying.
+- in this way the main distinction between both approaches is
+whether to pretrain from scratch for recurrence, or whether        7. What Mechanisms Emerge at Scale in
+to finetune existing fixed-depth models to have this capabil-         Recurrent-Depth Models
+ity - and whether Chain-of-Thought data is required.
+                                                                   Finally, what is the model doing while recurring in latent
+6.4. Zero-Shot Self-Speculative Decoding                           space? To understand this question better, we analyze the
+                                                                   trajectories {si}ri=1 of the model on a few qualitative ex-
+Recurrent-depth models can also inherently generate text           amples. We are especially interested in understanding what
+more efficiently by using speculative decoding (Leviathan
+et al., 2023) without the need for a separate draft model.
+
+                                                               11
+   Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                 Token: " deeper"  9 PC3-PC4                         10 PC5-PC6
+                    PC1-PC2
+
+8
+
+0                                  0                                 0
+
+8 18 0 18 9 29 0 29 10 8 0 8
+
+                   Token: " 3"     13 PC3-PC4                        5 PC5-PC6
+                    PC1-PC2
+
+4
+
+0                                  0                                 0
+
+4 10 0 10 13 10 0 10 5 13 0 13
+
+                 Token: " wrong"   14 PC3-PC4                        11 PC5-PC6
+                    PC1-PC2
+
+7
+
+0                                  0                                 0
+
+                                   7 12 0 12 14 4 0 4 11 10 0 10
+
+Figure 12: Latent Space trajectories for select tokens. We show a small part of these high-dimensional trajectories by visualizing the first
+6 PCA directions, computing the PCA over all latent state trajectories of all tokens in a sequence. The color gradient going from dark
+to bright represents steps in the trajectory. The center of mass is marked in red. While on many tokens, the state simply converges (top
+row), the model also learns to use orbits (middle row), and “sliders” (bottom row, middle), which we observe being used to represent and
+handle more advanced concepts, such as arithmetic or complicated deliberation.
+
+patterns emerge, simply by training this model at scale. In          We look at trajectories for select tokens in more detail in Fig-
+comparison to previous work, such as Bai et al. (2019),              ure 12. We compute a PCA decomposition of latent trajec-
+where the training objective directly encodes a prior that           tories over all tokens in a sequence, and then show several
+pushes trajectories to a fixed point, we only train with our         individual trajectories projected onto the first six PCA direc-
+truncated unrolling objective.                                       tions. See the appendix for more examples. Many tokens
+                                                                     simply converge to a fixed point, such as the token in the
+Figure 11 shows the norm distance ||si − s∗|| between each           top row. Yet, for harder questions, such as in the 2nd row5,
+si in a trajectory and an approximate limit point s∗ com-            the state of the token quickly falls into an orbit pattern in all
+puted with 128 iterations. We show the sentence top to               three pairs of PCA directions. The use of multi-dimensional
+bottom and iterations from left to right. We clearly see that        orbits like these could serve a similar purpose to periodic
+convergence behavior depends on context. We see that key             patterns sometimes observed in fixed-depth transformers
+parts of the question, and the start of the model response, are      trained for arithmetic tasks (Nanda et al., 2022), but we find
+“deliberated” much more in latent space. The context depen-          these patterns extend far beyond arithmetic for our model.
+dence can also be seen in the different behavior among the           We often also observe the use of orbits on tokens such as
+three identical tokens representing each of the three dots.          “makes” (see Figure 16) or “thinks” that determine the struc-
+Also note that the distance to s∗ does not always decrease           ture of the response.
+monotonically (e.g. for school); the model may also trace
+out complicated orbits in its latent trajectory while process-           5This is the token "3" in a GSM8k test question that opens with
+ing information, even though this is not represented explic-         Claire makes a 3 egg omelette.
+itly in our training objective.
+
+                                                                 12
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Aside from orbits, we also observe the model encoding par-           are further related to diffusion models (Song and Ermon,
+ticular key tokens as “sliders”, as seen in the middle of the        2019), especially latent diffusion models (Rombach et al.,
+bottom row in Figure 12 (which is the token “wrong”, from            2022), but we note that language diffusion models are usu-
+the same message as already shown in Figure 11). In these            ally run with a per-sequence, instead of a per-token, itera-
+motions the trajectory noticeably drifts in a single direction,      tion count (Lee et al., 2018). A key difference of our ap-
+which the model could use to implement a mechanism to                proach to both equilibrium models and diffusion models is
+count how many iterations have occurred.                             in the training objective, where equilibrium methods solve
+                                                                     the “direct” problem (Geiping and Moeller, 2019), diffusion
+The emergence of structured trajectories in latent space             models solve a surrogate training objective, and our work
+gives us a glimpse into how the model performs its com-              suggests that truncated unrolling is a scalable alternative.
+putations. Unlike the discrete sequential chain of reasoning
+seen in verbalized chain-of-thought approaches, we observe           More generally, all architectures that recur in depth can also
+rich geometric patterns including orbits, convergent paths,          be understood as directly learning the analog to the gradient
+and drifts - means to organize its computational process spa-        of a latent energy-based model (LeCun and Huang, 2005;
+tially. This suggests the model is independently learning to         LeCun, 2022), to an implicitly defined intermediate opti-
+leverage the high-dimensional nature of its latent space to          mization layer (Amos and Kolter, 2017), or to a Kuramoto
+implement reasoning in new ways.                                     layer (Miyato et al., 2024). Analogies to gradient descent at
+                                                                     inference time also show the connection to test time adap-
+Path Independence. We verify that our models maintain                tation (Sun et al., 2020), especially test-time adaptation of
+path independence, in the sense of Anil et al. (2022), de-           output states (Boudiaf et al., 2022).
+spite their complex, learned dynamics, which we discussed
+prior (see also the additional examples in Appendix Fig-             Aside from full recurrent-depth architectures, there also ex-
+ure 22). When re-initializing from multiple starting states          ist a number of proposals for hybrid architectures, such as
+s0, the model moves in similar trajectories, exhibiting con-         models with latent sub-networks (Li et al., 2020a), LoRA
+sistent behavior. The same orbital patterns, fixed points, or        adapters on top of weight-shared layers (Bae et al., 2024),
+directional drifts emerge regardless of initialization.              or (dynamic) weight-tying of trained models (Hay and Wolf,
+                                                                     2023; Liu et al., 2024b).
+8. Related Work Overview
+                                                                     As mentioned in Section 6, while we consider the proposed
+The extent to which recurrence is a foundational concept             recurrent depth approach to be a very natural way to learn
+of machine learning is hard to overstate (Amari, 1972;               to reason in continuous latent space from the ground up, the
+Hopfield, 1982; Braitenberg, 1986; Gers and Schmidhu-                works of Hao et al. (2024); Cheng and Durme (2024) and
+ber, 2000; Sutskever et al., 2008). Aside from using re-             Liu et al. (2024a) discuss how to finetune existing fixed-
+currence to move along sequences, as in recurrent neural             depth transformers with this capability. These works have a
+networks, it was understood early to also be the key to              similar aim to ours, enabling reasoning in latent space, but
+adaptive computation (Schmidhuber, 2012; Graves, 2017).              approach this goal from separate directions.
+For transformers, recurrence was applied in Dehghani et al.
+(2019), who highlight the aim of recurrent depth to model            For additional discussions related to the idea of construct-
+universal, i.e. Turing-complete, machines (Graves et al.,            ing a prior that incentivizes reasoning and algorithm learn-
+2014). It was used at scale (but with fixed recurrence) in           ing at the expense of memorization of simple patterns, we
+Lan et al. (2019) and an interesting recent improvement in           also refer to Chollet (2019), Schwarzschild (2023), Li et al.
+this line of work are described in Tan et al. (2023); Abnar          (2020b) and Moulton (2023).
+et al. (2023), Mathur et al. (2024) and Csordás et al. (2024).
+Schwarzschild et al. (2021b); Bansal et al. (2022); Bear et al.      9. Future Work
+(2024) and McLeish et al. (2024) show that depth recurrence
+is advantageous when learning generalizable algorithms               Aside from work extending and analyzing the scaling be-
+when training with randomized unrolling and input injec-             haviors of recurrent depth models, there are many ques-
+tions. Recent work has described depth-recurrent, looped,            tions that remain unanswered. For example, to us, there are
+transformers and studied their potential benefits with careful       potentially a large number of novel post-training schemes
+theoretical and small-scale analysis (Giannou et al., 2023;          that further enhance the capabilities of these models, such
+Gatmiry et al., 2024; Yang et al., 2024a; Fan et al., 2025).         as fine-tuning to compress the recurrence or reinforcement
+                                                                     learning with data with different hardness levels (Zelikman
+From another angle, these models can be described as neu-            et al., 2024), or to internalize reasoning from CoT data into
+ral networks learning a fixed-point iteration, as studied in         the recurrence (Deng et al., 2024).
+deep equilibrium models (Bai et al., 2019; 2022). They
+                                                                     Another aspect not covered in this work is the relationship
+
+                                                                 13
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+to other modern architecture improvements. Efficient se-             latent space without the need for specialized data at train
+quence mixing operations, especially those that are linear in        time or verbalization at inference time.
+sequence dimension, such as linear attention (Katharopou-
+los et al., 2020; Yang et al., 2024b), are limited in the num-       Acknowledgements
+ber of comparisons that can be made. However, with re-
+current depth, blocks containing linear operators can repeat         This project was made possible by the INCITE program:
+until all necessary comparisons between sequence elements            An award for computer time was provided by the U.S. De-
+are computed (Suzgun et al., 2019). For simplicity, we also          partment of Energy’s (DOE) Innovative and Novel Compu-
+focus on a single recurrence, where prior work has con-              tational Impact on Theory and Experiment (INCITE) Pro-
+sidered multiple successive recurrent stages (Takase and             gram. This research used resources of the Oak Ridge Lead-
+Kiyono, 2023; Csordás et al., 2024).                                 ership Computing Facility at the Oak Ridge National Lab-
+                                                                     oratory, which is supported by the Office of Science of
+Finally, the proposed architecture is set up to be compute-          the U.S. Department of Energy under Contract No. DE-
+heavy, with more “materialized” parameters than there are            AC05-00OR22725. Work on the LLNL side was prepared
+actual parameters. This naturally mirrors mixture-of-expert          by LLNL under Contract DE-AC52-07NA27344 and sup-
+models (MoE), which are parameter-heavy, using fewer ac-             ported by the LLNL-LDRD Program under Project No. 24-
+tive parameters per forward pass than exist within the model         ERD-010 and 24-ERD-058 (LLNL-CONF-872390). This
+(Shazeer et al., 2017; Fedus et al., 2022). We posit that            manuscript has been authored by Lawrence Livermore
+where the recurrent-depth setup excels at learning reasoning         National Security, LLC under Contract No. DE-AC52-
+patterns, the MoE excels at effectively storing and retriev-         07NA27344 with the U.S. Department of Energy. The
+ing complex information. Their complementarity supports              United States Government retains a non-exclusive, paid-up,
+the hypothesis that a future architecture would contain both         irrevocable, world-wide license to publish or reproduce the
+modifications. While in a standard MoE model, each ex-               published form of this manuscript, or allow others to do so,
+pert can only be activated once per forward pass, or skipped         for United States Government purposes.
+entirely, a recurrent MoE model could also refine its latent
+state over multiple iterations, potentially routing to the same      JG further acknowledges the support of the Hector II foun-
+expert multiple times, before switching to a different one           dation. A large number of small-scale and preliminary ex-
+(Tan et al., 2023; Csordás et al., 2024). While MoE models           periments were made possible through the support of the
+are the currently leading solution to implement this type of         MPI Intelligent Systems compute cluster and funding by
+“memory” in dense transformers, these considerations also            the Tübingen AI center.
+hold for other memory mechanisms suggested for LLMs
+(Sukhbaatar et al., 2019; Fan et al., 2021; Wu et al., 2022;         UMD researchers were further supported by the ONR
+He et al., 2024).                                                    MURI program, DARPA TIAMAT, the National Science
+                                                                     Foundation (IIS-2212182), and the NSF TRAILS Institute
+10. Conclusions                                                      (2229885). Commercial support was provided by Capital
+                                                                     One Bank, the Amazon Research Award program, and Open
+The models described in this paper are ultimately still              Philanthropy. Finally, we thank Avi Schwarzschild for help-
+a proof-of-concept. We describe how to train a latent                ful comments on the initial draft.
+recurrent-depth architecture, what parameters we chose,
+and then trained a single model at scale. Future training            References
+runs are likely to train with more optimized learning rate
+schedules, data mixes and accelerators. Still we observe a           Samira Abnar, Omid Saremi, Laurent Dinh, Shantel Wilson,
+number of interesting behaviors emerging naturally from                 Miguel Angel Bautista, Chen Huang, Vimal Thilak, Etai Lit-
+recurrent training. The most important of these is the ability          twin, Jiatao Gu, Josh Susskind, and Samy Bengio. 2023. Adap-
+to use latent reasoning to dramatically improve performance             tivity and Modularity for Efficient Generalization Over Task
+on reasoning tasks by expending test-time computation. In               Complexity. arxiv:2310.08866[cs].
+addition, we also observe context-dependent convergence
+speed, path independence, and various zero-shot abilities.           AI2. 2024. OLMo 1.7–7B: A 24 point improvement on MMLU.
+This leads us to believe that latent reasoning is a promising
+research direction to complement existing approaches for             Zeyuan Allen-Zhu and Yuanzhi Li. 2024. Physics of language
+test-time compute scaling. The model we realize is surpris-             models: Part 3.1, knowledge storage and extraction. In Proceed-
+ingly powerful given its size and amount of training data,              ings of the 41st International Conference on Machine Learning,
+and we are excited about the potential impact of imbuing                volume 235 of ICML’24, pages 1067–1077, Vienna, Austria.
+generative models with the ability to reason in continuous              JMLR.org.
+
+                                                                     S.-I. Amari. 1972. Learning Patterns and Pattern Sequences by
+                                                                        Self-Organizing Nets of Threshold Elements. IEEE Transac-
+                                                                        tions on Computers, C-21(11):1197–1206.
+
+                                                                 14
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+AMD. 2021. AMD Instinct™ MI250X Accelerators.                          Stella Biderman, Hailey Schoelkopf, Quentin Anthony, Herbie
+                                                                          Bradley, Kyle O’Brien, Eric Hallahan, Mohammad Aflah Khan,
+Aida Amini, Saadia Gabriel, Peter Lin, Rik Koncel-Kedziorski,             Shivanshu Purohit, USVSN Sai Prashanth, Edward Raff, Aviya
+   Yejin Choi, and Hannaneh Hajishirzi. 2019. Mathqa: Towards             Skowron, Lintang Sutawika, and Oskar van der Wal. 2023.
+   interpretable math word problem solving with operation-based           Pythia: A Suite for Analyzing Large Language Models Across
+   formalisms. arXiv preprint arXiv:1905.13319.                           Training and Scaling. arxiv:2304.01373[cs].
+
+Brandon Amos and J. Zico Kolter. 2017. OptNet: Differentiable          Stella Biderman, Hailey Schoelkopf, Lintang Sutawika, Leo Gao,
+   Optimization as a Layer in Neural Networks. In International           Jonathan Tow, Baber Abbasi, Alham Fikri Aji, Pawan Sasanka
+   Conference on Machine Learning, pages 136–145.                         Ammanamanchi, Sidney Black, Jordan Clive, Anthony DiPofi,
+                                                                          Julen Etxaniz, Benjamin Fattori, Jessica Zosa Forde, Charles
+Cem Anil, Ashwini Pokle, Kaiqu Liang, Johannes Treutlein,                 Foster, Jeffrey Hsu, Mimansa Jaiswal, Wilson Y. Lee,
+   Yuhuai Wu, Shaojie Bai, J. Zico Kolter, and Roger Baker                Haonan Li, and 11 others. 2024. Lessons from the
+   Grosse. 2022. Path Independent Equilibrium Models Can                  Trenches on Reproducible Evaluation of Language Models.
+   Better Exploit Test-Time Computation. In Advances in Neural            arxiv:2405.14782[cs].
+   Information Processing Systems.
+                                                                       Yonatan Bisk, Rowan Zellers, Ronan Le Bras, Jianfeng Gao, and
+Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma,                 Yejin Choi. 2020. Piqa: Reasoning about physical common-
+   Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai,              sense in natural language. In Thirty-Fourth AAAI Conference
+   Michael Terry, Quoc Le, and 1 others. 2021. Program synthesis          on Artificial Intelligence.
+   with large language models. arXiv preprint arXiv:2108.07732.
+                                                                       Malik Boudiaf, Romain Mueller, Ismail Ben Ayed, and Luca
+Zhangir Azerbayev, Hailey Schoelkopf, Keiran Paster, Marco Dos            Bertinetto. 2022. Parameter-Free Online Test-Time Adaptation.
+   Santos, Stephen Marcus McAleer, Albert Q. Jiang, Jia Deng,             In Proceedings of the IEEE/CVF Conference on Computer Vi-
+   Stella Biderman, and Sean Welleck. 2023. Llemma: An Open               sion and Pattern Recognition, pages 8344–8353.
+   Language Model for Mathematics. In The Twelfth International
+   Conference on Learning Representations.                             Valentino Braitenberg. 1986. Vehicles: Experiments in Synthetic
+                                                                          Psychology. MIT press.
+Sangmin Bae, Adam Fisch, Hrayr Harutyunyan, Ziwei Ji, Se-
+   ungyeon Kim, and Tal Schuster. 2024. Relaxed Recursive              William Brandon, Mayank Mishra, Aniruddha Nrusimha,
+   Transformers: Effective Parameter Sharing with Layer-wise              Rameswar Panda, and Jonathan Ragan Kelly. 2024. Reducing
+   LoRA.                                                                  Transformer Key-Value Cache Size with Cross-Layer Attention.
+                                                                          arxiv:2405.12981[cs].
+Shaojie Bai, J. Zico Kolter, and Vladlen Koltun. 2019. Deep Equi-
+   librium Models. In Advances in Neural Information Processing        British Library Labs. 2021. Digitised Books. c. 1510 - c. 1900.
+   Systems, volume 32. Curran Associates, Inc.                            JSONL (OCR Derived Text + Metadata). British Library.
+
+Shaojie Bai, Vladlen Koltun, and J. Zico Kolter. 2022. Neural          Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D.
+   Deep Equilibrium Solvers. In International Conference on               Lee, Deming Chen, and Tri Dao. 2024. Medusa: Simple
+   Learning Representations.                                              LLM Inference Acceleration Framework with Multiple Decod-
+                                                                          ing Heads. In Forty-First International Conference on Machine
+Yushi Bai, Jiajie Zhang, Xin Lv, Linzhi Zheng, Siqi Zhu, Lei Hou,         Learning.
+   Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. LongWriter: Un-
+   leashing 10,000+ Word Generation from Long Context LLMs.            character.ai. 2024. Optimizing AI Inference at Character.AI.
+   arxiv:2408.07055[cs].
+                                                                       Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Hen-
+Andrea Banino, Jan Balaguer, and Charles Blundell. 2021. Pon-             rique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards,
+   derNet: Learning to Ponder. In 8th ICML Workshop on Auto-              Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul
+   mated Machine Learning (AutoML).                                       Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish
+                                                                          Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, and 39 oth-
+Arpit Bansal, Avi Schwarzschild, Eitan Borgnia, Zeyad Emam,               ers. 2021. Evaluating large language models trained on code.
+   Furong Huang, Micah Goldblum, and Tom Goldstein. 2022.                 Preprint, arXiv:2107.03374.
+   End-to-end Algorithm Synthesis with Recurrent Networks: Ex-
+   trapolation without Overthinking. In Advances in Neural Infor-      Jeffrey Cheng and Benjamin Van Durme. 2024. Compressed
+   mation Processing Systems.                                             Chain of Thought: Efficient Reasoning Through Dense Repre-
+                                                                          sentations. arxiv:2412.13171[cs].
+Heinz H. Bauschke, Sarah M. Moffat, and Xianfu Wang. 2011.
+   Firmly nonexpansive mappings and maximally monotone oper-           Euirim Choi. 2023. GoodWiki dataset.
+   ators: Correspondence and duality. arXiv:1101.4688 [math].
+                                                                       François Chollet. 2019.   On the Measure of Intelligence.
+Jay Bear, Adam Prügel-Bennett, and Jonathon Hare. 2024. Re-               arxiv:1911.01547[cs].
+   thinking Deep Thinking: Stable Learning of Algorithms using
+   Lipschitz Constraints. arxiv:2410.23451[cs].                        Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten
+                                                                          Bosma, Gaurav Mishra, Adam Roberts, Paul Barham,
+Stas Bekman. 2023. Machine Learning Engineering Open Book.                Hyung Won Chung, Charles Sutton, Sebastian Gehrmann,
+   Stasosphere Online Inc.                                                Parker Schuh, Kensen Shi, Sasha Tsvyashchenko, Joshua
+                                                                          Maynez, Abhishek Rao, Parker Barnes, Yi Tay, Noam Shazeer,
+Loubna Ben Allal, Anton Lozhkov, Guilherme Penedo, Thomas                 Vinodkumar Prabhakaran, and 48 others. 2022. PaLM: Scaling
+   Wolf, and Leandro von Werra. 2024. SmolLM-corpus.                      Language Modeling with Pathways. arXiv:2204.02311 [cs].
+
+                                                                   15
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sab-       Mostafa Elhoushi, Akshat Shrivastava, Diana Liskovich, Basil
+   harwal, Carissa Schoenick, and Oyvind Tafjord. 2018. Think              Hosmer, Bram Wasti, Liangzhen Lai, Anas Mahmoud, Bilge
+   you have solved question answering? try arc, the ai2 reasoning          Acun, Saurabh Agarwal, Ahmed Roman, Ahmed A. Aly,
+   challenge. arXiv:1803.05457v1.                                          Beidi Chen, and Carole-Jean Wu. 2024. LayerSkip: En-
+                                                                           abling Early Exit Inference and Self-Speculative Decoding.
+Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen,                 arxiv:2404.16710[cs].
+   Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek,
+   Jacob Hilton, Reiichiro Nakano, Christopher Hesse, and John          Katie Everett, Lechao Xiao, Mitchell Wortsman, Alexander A.
+   Schulman. 2021. Training Verifiers to Solve Math Word Prob-             Alemi, Roman Novak, Peter J. Liu, Izzeddin Gur, Jascha Sohl-
+   lems. arxiv:2110.14168[cs].                                             Dickstein, Leslie Pack Kaelbling, Jaehoon Lee, and Jeffrey Pen-
+                                                                           nington. 2024. Scaling Exponents Across Parameterizations
+Owen Colegrove, Vik Paruchuri, and OpenPhi-Team. 2024. Open-               and Optimizers. arxiv:2407.05872[cs].
+   phi/textbooks · Datasets at Hugging Face.
+                                                                        Angela Fan, Edouard Grave, and Armand Joulin. 2019. Reduc-
+Róbert Csordás, Kazuki Irie, Jürgen Schmidhuber, Christopher               ing Transformer Depth on Demand with Structured Dropout.
+   Potts, and Christopher D. Manning. 2024. MoEUT: Mixture-                arxiv:1909.11556[cs, stat].
+   of-Experts Universal Transformers. In The Thirty-eighth An-
+   nual Conference on Neural Information Processing Systems.            Angela Fan, Thibaut Lavril, Edouard Grave, Armand Joulin, and
+                                                                           Sainbayar Sukhbaatar. 2021. Addressing Some Limitations of
+Gautier Dagan. 2024. Bpeasy.                                               Transformers with Feedback Memory. arxiv:2002.09402[cs,
+                                                                           stat].
+Gautier Dagan, Gabriel Synnaeve, and Baptiste Rozière. 2024.
+   Getting the most out of your tokenizer for pre-training and do-      Ying Fan, Yilun Du, Kannan Ramchandran, and Kangwook Lee.
+   main adaptation. arxiv:2402.01035[cs].                                  2025. Looped Transformers for Length Generalization. In The
+                                                                           Thirteenth International Conference on Learning Representa-
+Tri Dao. 2023. FlashAttention-2: Faster Attention with Better              tions.
+   Parallelism and Work Partitioning. arxiv:2307.08691[cs].
+                                                                        William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch
+Tri Dao, Daniel Y. Fu, Stefano Ermon, Atri Rudra, and Christo-             Transformers: Scaling to Trillion Parameter Models with Sim-
+   pher Ré. 2022. FlashAttention: Fast and Memory-Efficient                ple and Efficient Sparsity. arxiv:2101.03961[cs].
+   Exact Attention with IO-Awareness. arxiv:2205.14135[cs].
+                                                                        Xidong Feng, Yicheng Luo, Ziyan Wang, Hongrui Tang, Mengyue
+DeepSeek-AI, Daya Guo, Dejian Yang, Haowei Zhang, Junxiao                  Yang, Kun Shao, David Mguni, Yali Du, and Jun Wang. 2023.
+   Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shirong Ma, Peiyi              ChessGPT: Bridging Policy Learning and Language Modeling.
+   Wang, Xiao Bi, Xiaokang Zhang, Xingkai Yu, Yu Wu, Z. F. Wu,             Advances in Neural Information Processing Systems, 36:7216–
+   Zhibin Gou, Zhihong Shao, Zhuoshu Li, Ziyi Gao, and 181 oth-            7262.
+   ers. 2025. DeepSeek-R1: Incentivizing Reasoning Capability
+   in LLMs via Reinforcement Learning. arxiv:2501.12948[cs].            Sebastian Gabarain. 2024. Locutusque/hercules-v5.0 · Datasets
+                                                                           at Hugging Face.
+DeepSeek-AI, Aixin Liu, Bei Feng, Bing Xue, Bingxuan Wang,
+   Bochao Wu, Chengda Lu, Chenggang Zhao, Chengqi Deng,                 Khashayar Gatmiry, Nikunj Saunshi, Sashank J. Reddi, Stefanie
+   Chenyu Zhang, Chong Ruan, Damai Dai, Daya Guo, Dejian                   Jegelka, and Sanjiv Kumar. 2024. Can Looped Transformers
+   Yang, Deli Chen, Dongjie Ji, Erhang Li, Fangyun Lin, Fucong             Learn to Implement Multi-step Gradient Descent for In-context
+   Dai, and 181 others. 2024. DeepSeek-V3 Technical Report.                Learning?
+   arxiv:2412.19437[cs].
+                                                                        Jonas Geiping and Tom Goldstein. 2023. Cramming: Training a
+Mostafa Dehghani, Stephan Gouws, Oriol Vinyals, Jakob Uszko-               Language Model on a single GPU in one day. In Proceedings of
+   reit, and Łukasz Kaiser. 2019. Universal Transformers.                  the 40th International Conference on Machine Learning, pages
+   arxiv:1807.03819[cs, stat].                                             11117–11143. PMLR.
+
+Yuntian Deng, Yejin Choi, and Stuart Shieber. 2024. From Ex-            Jonas Geiping and Michael Moeller. 2019. Parametric Majoriza-
+   plicit CoT to Implicit CoT: Learning to Internalize CoT Step            tion for Data-Driven Energy Minimization Methods. In Pro-
+   by Step. arxiv:2405.14838[cs].                                          ceedings of the IEEE International Conference on Computer
+                                                                           Vision, pages 10262–10273.
+Hantian Ding, Zijian Wang, Giovanni Paolini, Varun Kumar,
+   Anoop Deoras, Dan Roth, and Stefano Soatto. 2024. Fewer              F.A. Gers and J. Schmidhuber. 2000. Recurrent nets that time and
+   Truncations Improve Language Modeling. In Forty-First Inter-            count. In Proceedings of the IEEE-INNS-ENNS International
+   national Conference on Machine Learning.                                Joint Conference on Neural Networks. IJCNN 2000. Neural
+                                                                           Computing: New Challenges and Perspectives for the New Mil-
+Ming Ding, Zhuoyi Yang, Wenyi Hong, Wendi Zheng, Chang                     lennium, volume 3, pages 189–194 vol.3.
+   Zhou, Da Yin, Junyang Lin, Xu Zou, Zhou Shao, Hongxia
+   Yang, and Jie Tang. 2021. CogView: Mastering Text-to-Image           Angeliki Giannou, Shashank Rajput, Jy-Yong Sohn, Kangwook
+   Generation via Transformers. In Advances in Neural Infor-               Lee, Jason D. Lee, and Dimitris Papailiopoulos. 2023. Looped
+   mation Processing Systems, volume 34, pages 19822–19835.                Transformers as Programmable Computers. In Proceedings of
+   Curran Associates, Inc.                                                 the 40th International Conference on Machine Learning, pages
+                                                                           11398–11442. PMLR.
+Maha Elbayad, Jiatao Gu, Edouard Grave, and Michael Auli. 2019.
+   Depth-Adaptive Transformer. In International Conference on
+   Learning Representations.
+
+                                                                    16
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Priya Goyal, Piotr Dollár, Ross Girshick, Pieter Noordhuis,             Matt Gardner Johannes Welbl, Nelson F. Liu. 2017. Crowdsourc-
+   Lukasz Wesolowski, Aapo Kyrola, Andrew Tulloch, Yangqing                ing multiple choice science questions.
+   Jia, and Kaiming He. 2018. Accurate, Large Minibatch SGD:
+   Training ImageNet in 1 Hour. arxiv:1706.02677[cs].                   Jean Kaddour. 2022. Stop Wasting My Time! Saving Days of
+                                                                           ImageNet and BERT Training with Latest Weight Averaging.
+Alex Graves. 2017. Adaptive Computation Time for Recurrent                 arxiv:2209.14981[cs, stat].
+   Neural Networks. arxiv:1603.08983[cs].
+                                                                        Guy Kaplan, Matanel Oren, Yuval Reif, and Roy Schwartz. 2024.
+Alex Graves, Greg Wayne, and Ivo Danihelka. 2014. Neural                   From Tokens to Words: On the Inner Lexicon of LLMs.
+   Turing Machines. arxiv:1410.5401[cs].                                   arxiv:2410.05864[cs].
+
+Dirk Groeneveld, Iz Beltagy, Pete Walsh, Akshita Bhagia, Rod-           Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown,
+   ney Kinney, Oyvind Tafjord, Ananya Harsh Jha, Hamish Ivison,            Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jef-
+   Ian Magnusson, Yizhong Wang, Shane Arora, David Atkinson,               frey Wu, and Dario Amodei. 2020. Scaling Laws for Neural
+   Russell Authur, Khyathi Raghavi Chandu, Arman Cohan, Jen-               Language Models. arxiv:2001.08361[cs, stat].
+   nifer Dumas, Yanai Elazar, Yuling Gu, Jack Hessel, and 24
+   others. 2024. OLMo: Accelerating the Science of Language             Angelos Katharopoulos, Apoorv Vyas, Nikolaos Pappas, and
+   Models. arxiv:2402.00838[cs].                                           François Fleuret. 2020. Transformers are RNNs: Fast Autore-
+                                                                           gressive Transformers with Linear Attention. In Proceedings of
+Alexander Hägele, Elie Bakouch, Atli Kosson, Loubna Ben Allal,             the 37th International Conference on Machine Learning, pages
+   Leandro Von Werra, and Martin Jaggi. 2024. Scaling Laws and             5156–5165. PMLR.
+   Compute-Optimal Training Beyond Fixed Training Durations.
+   In Workshop on Efficient Systems for Foundation Models II @          Matthew Kenney. 2024. ArXivDLInstruct.
+   ICML2024.
+                                                                        Seungone Kim, Juyoung Suk, Shayne Longpre, Bill Yuchen Lin,
+Shibo Hao, Sainbayar Sukhbaatar, DiJia Su, Xian Li, Zhiting Hu,            Jamin Shin, Sean Welleck, Graham Neubig, Moontae Lee,
+   Jason Weston, and Yuandong Tian. 2024. Training Large                   Kyungjae Lee, and Minjoon Seo. 2024. Prometheus 2: An
+   Language Models to Reason in a Continuous Latent Space.                 Open Source Language Model Specialized in Evaluating Other
+   arxiv:2412.06769[cs].                                                   Language Models. In Proceedings of the 2024 Conference
+                                                                           on Empirical Methods in Natural Language Processing, pages
+Tamir David Hay and Lior Wolf. 2023. Dynamic Layer Tying for               4334–4353, Miami, Florida, USA. Association for Computa-
+   Parameter-Efficient Transformers. In The Twelfth International          tional Linguistics.
+   Conference on Learning Representations.
+                                                                        Diederik P. Kingma and Jimmy Ba. 2015. Adam: A Method
+Zexue He, Leonid Karlinsky, Donghyun Kim, Julian McAuley,                  for Stochastic Optimization. In International Conference on
+   Dmitry Krotov, and Rogerio Feris. 2024. CAMELoT: Towards                Learning Representations (ICLR), San Diego.
+   Large Language Models with Training-Free Consolidated As-
+   sociative Memory. arxiv:2402.13449[cs].                              Wojciech Krys´cin´ski, Nazneen Rajani, Divyansh Agarwal, Caim-
+                                                                           ing Xiong, and Dragomir Radev. 2022. BookSum: A Col-
+Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas               lection of Datasets for Long-form Narrative Summarization.
+   Mazeika, Dawn Song, and Jacob Steinhardt. 2021a. Measuring              arxiv:2105.08209[cs].
+   massive multitask language understanding. Proceedings of the
+   International Conference on Learning Representations (ICLR).         Xin Lai, Zhuotao Tian, Yukang Chen, Senqiao Yang, Xian-
+                                                                           gru Peng, and Jiaya Jia. 2024. Step-DPO: Step-wise
+Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas               Preference Optimization for Long-chain Reasoning of LLMs.
+   Mazeika, Dawn Song, and Jacob Steinhardt. 2021b. Measuring              arxiv:2406.18629[cs].
+   Massive Multitask Language Understanding. In International
+   Conference on Learning Representations.                              Zhenzhong Lan, Mingda Chen, Sebastian Goodman, Kevin Gim-
+                                                                           pel, Piyush Sharma, and Radu Soricut. 2019. ALBERT: A Lite
+J J Hopfield. 1982. Neural networks and physical systems with              BERT for Self-supervised Learning of Language Representa-
+   emergent collective computational abilities. Proceedings of the         tions. In International Conference on Learning Representa-
+   National Academy of Sciences of the United States of America,           tions.
+   79(8):2554–2558.
+                                                                        Yann LeCun. 2022. A Path Towards Autonomous Machine Intel-
+Jiewen Hu, Thomas Zhu, and Sean Welleck. 2024.                             ligence. Preprint, Version 0.9.2:62.
+   miniCTX: Neural Theorem Proving with (Long-)Contexts.
+   arxiv:2408.03350[cs].                                                Yann LeCun and Fu Jie Huang. 2005. Loss functions for dis-
+                                                                           criminative training of energy-based models. In AISTATS 2005
+Pavel Izmailov, Dmitrii Podoprikhin, Timur Garipov, Dmitry                - Proceedings of the 10th International Workshop on Artificial
+   Vetrov, and Andrew Gordon Wilson. 2018. Averaging weights               Intelligence and Statistics, pages 206–213.
+   leads to wider optima and better generalization: 34th Confer-
+   ence on Uncertainty in Artificial Intelligence 2018, UAI 2018.       Jason Lee, Elman Mansimov, and Kyunghyun Cho. 2018. De-
+   34th Conference on Uncertainty in Artificial Intelligence 2018,         terministic Non-Autoregressive Neural Sequence Modeling by
+   UAI 2018, pages 876–885.                                                Iterative Refinement. In Proceedings of the 2018 Conference
+                                                                           on Empirical Methods in Natural Language Processing, pages
+Albert Q. Jiang, Wenda Li, and Mateja Jamnik. 2023. Multilin-              1173–1182, Brussels, Belgium. Association for Computational
+   gual Mathematical Autoformalization. arxiv:2311.03755[cs].              Linguistics.
+
+                                                                    17
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast              Anton Lozhkov, Raymond Li, Loubna Ben Allal, Federico Cas-
+   Inference from Transformers via Speculative Decoding. In                 sano, Joel Lamy-Poirier, Nouamane Tazi, Ao Tang, Dmytro
+   Proceedings of the 40th International Conference on Machine              Pykhtar, Jiawei Liu, Yuxiang Wei, Tianyang Liu, Max Tian,
+   Learning, pages 19274–19286. PMLR.                                       Denis Kocetkov, Arthur Zucker, Younes Belkada, Zijian Wang,
+                                                                            Qian Liu, Dmitry Abulkhanov, Indraneil Paul, and 47 others.
+Yoav Levine, Noam Wies, Or Sharir, Hofit Bata, and Amnon                    2024. StarCoder 2 and The Stack v2: The Next Generation.
+   Shashua. 2021. The Depth-to-Width Interplay in Self-
+   Attention. arxiv:2006.12467[cs, stat].                                Zimu Lu, Aojun Zhou, Ke Wang, Houxing Ren, Weikang Shi,
+                                                                            Junting Pan, Mingjie Zhan, and Hongsheng Li. 2024. Math-
+Aitor Lewkowycz, Anders Andreassen, David Dohan, Ethan Dyer,                Coder2: Better Math Reasoning from Continued Pretraining on
+   Henryk Michalewski, Vinay Ramasesh, Ambrose Slone, Cem                   Model-translated Mathematical Code. arxiv:2410.08196[cs].
+   Anil, Imanol Schlag, Theo Gutman-Solo, Yuhuai Wu, Behnam
+   Neyshabur, Guy Gur-Ari, and Vedant Misra. 2022. Solv-                 Sebastian Majstorovic. 2024. Selected Digitized Books | The
+   ing quantitative reasoning problems with language models.                Library of Congress.
+   Preprint, arXiv:2206.14858.
+                                                                         Larisa Markeeva, Sean McLeish, Borja Ibarz, Wilfried Bounsi,
+Raymond Li, Loubna Ben Allal, Yangtian Zi, Niklas Muennighoff,              Olga Kozlova, Alex Vitvitskyi, Charles Blundell, Tom Gold-
+   Denis Kocetkov, Chenghao Mou, Marc Marone, Christopher                   stein, Avi Schwarzschild, and Petar Velicˇkovic´. 2024. The
+   Akiki, Jia Li, Jenny Chim, Qian Liu, Evgenii Zheltonozhskii,             CLRS-Text Algorithmic Reasoning Language Benchmark.
+   Terry Yue Zhuo, Thomas Wang, Olivier Dehaene, Joel Lamy-                 arxiv:2406.04229[cs].
+   Poirier, Joao Monteiro, Nicolas Gontier, Ming-Ho Yee, and
+   39 others. 2023. StarCoder: May the source be with you!               Mrinal Mathur, Barak A. Pearlmutter, and Sergey M. Plis. 2024.
+   Transactions on Machine Learning Research.                               MIND over Body: Adaptive Thinking using Dynamic Compu-
+                                                                            tation. In The Thirteenth International Conference on Learning
+Xian Li, Asa Cooper Stickland, Yuqing Tang, and Xiang                       Representations.
+   Kong. 2020a. Deep Transformers with Latent Depth.
+   arxiv:2009.13102[cs].                                                 Sean Michael McLeish, Arpit Bansal, Alex Stein, Neel Jain, John
+                                                                            Kirchenbauer, Brian R. Bartoldson, Bhavya Kailkhura, Ab-
+Yujia Li, Felix Gimeno, Pushmeet Kohli, and Oriol Vinyals.                  hinav Bhatele, Jonas Geiping, Avi Schwarzschild, and Tom
+   2020b. Strong Generalization and Efficiency in Neural Pro-               Goldstein. 2024. Transformers Can Do Arithmetic with the
+   grams. arxiv:2007.03629[cs].                                             Right Embeddings. In The Thirty-eighth Annual Conference
+                                                                            on Neural Information Processing Systems.
+Omkar Pangarkar Liping Tang, Nikhil Ranjan. 2024. TxT360: A
+   top-quality LLM pre-training dataset requires the perfect blend.      William Merrill, Ashish Sabharwal, and Noah A. Smith. 2022.
+                                                                            Saturated Transformers are Constant-Depth Threshold Circuits.
+Hao Liu, Matei Zaharia, and Pieter Abbeel. 2023a. Ring attention            Transactions of the Association for Computational Linguistics,
+   with blockwise transformers for near-infinite context. arXiv             10:843–856.
+   preprint arXiv:2310.01889.
+                                                                         Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal.
+Luyang Liu, Jonas Pfeiffer, Jiaxing Wu, Jun Xie, and Arthur                 2018. Can a suit of armor conduct electricity? a new dataset
+   Szlam. 2024a. Deliberation in Latent Space via Differentiable            for open book question answering. In EMNLP.
+   Cache Augmentation. arxiv:2412.17747[cs].
+                                                                         Tomáš Mikolov, Stefan Kombrink, Lukáš Burget, Jan Cˇ ernocký,
+Xiao Liu, Hanyu Lai, Hao Yu, Yifan Xu, Aohan Zeng, Zhengxiao                and Sanjeev Khudanpur. 2011. Extensions of recurrent neural
+   Du, Peng Zhang, Yuxiao Dong, and Jie Tang. 2023b. We-                    network language model. In 2011 IEEE International Con-
+   bGLM: Towards An Efficient Web-Enhanced Question An-                     ference on Acoustics, Speech and Signal Processing (ICASSP),
+   swering System with Human Preferences. In Proceedings of                 pages 5528–5531.
+   the 29th ACM SIGKDD Conference on Knowledge Discovery
+   and Data Mining, KDD ’23, pages 4549–4560, New York, NY,              Takeru Miyato, Sindy Löwe, Andreas Geiger, and Max Welling.
+   USA. Association for Computing Machinery.                                2024. Artificial Kuramoto Oscillatory Neurons. In The Thir-
+                                                                            teenth International Conference on Learning Representations,
+Zechun Liu, Changsheng Zhao, Forrest Iandola, Chen Lai,                     Singapore.
+   Yuandong Tian, Igor Fedorov, Yunyang Xiong, Ernie Chang,
+   Yangyang Shi, Raghuraman Krishnamoorthi, Liangzhen Lai,               Ryan Moulton. 2023. The Many Ways that Digital Minds Can
+   and Vikas Chandra. 2024b. MobileLLM: Optimizing Sub-                     Know.
+   billion Parameter Language Models for On-Device Use Cases.
+   arxiv:2402.14905[cs].                                                 Niklas Muennighoff, Qian Liu, Armel Zebaze, Qinkai Zheng,
+                                                                            Binyuan Hui, Terry Yue Zhuo, Swayam Singh, Xiangru Tang,
+Zhengzhong Liu, Aurick Qiao, Willie Neiswanger, Hongyi Wang,                Leandro von Werra, and Shayne Longpre. 2024. Oc-
+   Bowen Tan, Tianhua Tao, Junbo Li, Yuqi Wang, Suqi Sun,                   toPack: Instruction Tuning Code Large Language Models.
+   Omkar Pangarkar, Richard Fan, Yi Gu, Victor Miller, Yong-                arxiv:2308.07124[cs].
+   hao Zhuang, Guowei He, Haonan Li, Fajri Koto, Liping Tang,
+   Nikhil Ranjan, and 9 others. 2023c. LLM360: Towards fully             Nam Pham. 2023. Tiny-textbooks (Revision 14de7ba).
+   transparent open-source LLMs.
+                                                                         Nam Pham. 2024. Tiny-strange-textbooks (Revision 6f304f1).
+Ilya Loshchilov and Frank Hutter. 2017. Decoupled Weight Decay
+   Regularization. arXiv:1711.05101 [cs, math].
+
+                                                                     18
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Neel Nanda, Lawrence Chan, Tom Lieberum, Jess Smith, and                Juergen Schmidhuber. 2012. Self-Delimiting Neural Networks.
+   Jacob Steinhardt. 2022. Progress measures for grokking via              arxiv:1210.0118[cs].
+   mechanistic interpretability. In The Eleventh International
+   Conference on Learning Representations.                              Tal Schuster, Adam Fisch, Jai Gupta, Mostafa Dehghani, Dara
+                                                                           Bahri, Vinh Q. Tran, Yi Tay, and Donald Metzler. 2022. Con-
+Lorenzo Noci, Sotiris Anagnostidis, Luca Biggio, Antonio Orvi-             fident Adaptive Language Modeling. In Advances in Neural
+   eto, Sidak Pal Singh, and Aurelien Lucchi. 2022. Signal Prop-           Information Processing Systems.
+   agation in Transformers: Theoretical Perspectives and the Role
+   of Rank Collapse. In Advances in Neural Information Process-         Avi Schwarzschild. 2023. Deep Thinking Systems: Logical Ex-
+   ing Systems.                                                            trapolation with Recurrent Neural Networks. Ph.D. thesis,
+                                                                           University of Maryland, College Park, College Park.
+OpenAI. 2024. New reasoning models: Openai o1-preview and
+   o1-mini. https://openai.com/research/o1-pre                          Avi Schwarzschild, Eitan Borgnia, Arjun Gupta, Arpit Bansal,
+   view-and-o1-mini.                                                       Zeyad Emam, Furong Huang, Micah Goldblum, and Tom Gold-
+                                                                           stein. 2021a. Datasets for Studying Generalization from Easy
+Long Ouyang, Jeff Wu, Xu Jiang, Diogo Almeida, Carroll L.                  to Hard Examples. arxiv:2108.06011[cs].
+   Wainwright, Pamela Mishkin, Chong Zhang, Sandhini Agar-
+   wal, Katarina Slama, Alex Ray, John Schulman, Jacob Hilton,          Avi Schwarzschild, Eitan Borgnia, Arjun Gupta, Furong Huang,
+   Fraser Kelton, Luke Miller, Maddie Simens, Amanda Askell,               Uzi Vishkin, Micah Goldblum, and Tom Goldstein. 2021b.
+   Peter Welinder, Paul Christiano, Jan Leike, and Ryan Lowe.              Can You Learn an Algorithm? Generalizing from Easy to Hard
+   2022. Training language models to follow instructions with              Problems with Recurrent Networks. In Advances in Neural
+   human feedback. arxiv:2203.02155[cs].                                   Information Processing Systems, volume 34, pages 6695–6706.
+                                                                           Curran Associates, Inc.
+Keiran Paster, Marco Dos Santos, Zhangir Azerbayev, and Jimmy
+   Ba. 2023. OpenWebMath: An Open Dataset of High-Quality               Avi Schwarzschild, Sean Michael McLeish, Arpit Bansal, Gabriel
+   Mathematical Web Text. In The Twelfth International Confer-             Diaz, Alex Stein, Aakash Chandnani, Aniruddha Saha, Richard
+   ence on Learning Representations.                                       Baraniuk, Long Tran-Thanh, Jonas Geiping, and Tom Gold-
+                                                                           stein. 2023. Algorithm Design for Learned Algorithms.
+William Peebles and Saining Xie. 2023. Scalable Diffusion Mod-
+   els with Transformers. In Proceedings of the IEEE/CVF Inter-         Rico Sennrich, Barry Haddow, and Alexandra Birch. 2016. Neu-
+   national Conference on Computer Vision, pages 4195–4205.                ral Machine Translation of Rare Words with Subword Units.
+                                                                           In Proceedings of the 54th Annual Meeting of the Association
+Alec Radford, Jeffrey Wu, Rewon Child, David Luan, Dario                   for Computational Linguistics (Volume 1: Long Papers), pages
+   Amodei, and Ilya Sutskever. 2019. Language Models are                   1715–1725, Berlin, Germany. Association for Computational
+   Unsupervised Multitask Learners. OpenAI, page 24.                       Linguistics.
+
+Jack W. Rae, Anna Potapenko, Siddhant M. Jayakumar, and                 Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song,
+   Timothy P. Lillicrap. 2019. Compressive Transformers for                Xiao Bi, Haowei Zhang, Mingchuan Zhang, YK Li, Y Wu, and
+   Long-Range Sequence Modelling. arxiv:1911.05507[cs].                    1 others. 2024. Deepseekmath: Pushing the limits of math-
+                                                                           ematical reasoning in open language models. arXiv preprint
+Samyam Rajbhandari, Jeff Rasley, Olatunji Ruwase, and Yuxiong              arXiv:2402.03300.
+   He. 2020. ZeRO: Memory optimizations Toward Training
+   Trillion Parameter Models. In SC20: International Conference         Noam Shazeer. 2020. GLU Variants Improve Transformer.
+   for High Performance Computing, Networking, Storage and                 arxiv:2002.05202[cs].
+   Analysis, pages 1–16.
+                                                                        Noam Shazeer, Azalia Mirhoseini, Krzysztof Maziarz, Andy
+Robin Rombach, Andreas Blattmann, Dominik Lorenz, Patrick                  Davis, Quoc Le, Geoffrey Hinton, and Jeff Dean. 2017. Outra-
+   Esser, and Björn Ommer. 2022. High-Resolution Image Syn-                geously Large Neural Networks: The Sparsely-Gated Mixture-
+   thesis With Latent Diffusion Models. In Proceedings of the              of-Experts Layer. arxiv:1701.06538[cs].
+   IEEE/CVF Conference on Computer Vision and Pattern Recog-
+   nition, pages 10684–10695.                                           Siddharth Singh and Abhinav Bhatele. 2022. AxoNN: An asyn-
+                                                                           chronous, message-driven parallel framework for extreme-scale
+Keisuke Sakaguchi, Ronan Le Bras, Chandra Bhagavatula, and                 deep learning. In 2022 IEEE International Parallel and Dis-
+   Yejin Choi. 2021. WinoGrande: An adversarial winograd                   tributed Processing Symposium (IPDPS), pages 606–616.
+   schema challenge at scale. Commun. ACM, 64(9):99–106.
+                                                                        Siddharth Singh, Prajwal Singhania, Aditya Ranjan, John Kirchen-
+Victor Sanh, Albert Webson, Colin Raffel, Stephen Bach, Lin-               bauer, Jonas Geiping, Yuxin Wen, Neel Jain, Abhimanyu Hans,
+   tang Sutawika, Zaid Alyafeai, Antoine Chaffin, Arnaud Stiegler,         Manli Shu, Aditya Tomar, Tom Goldstein, and Abhinav Bhatele.
+   Arun Raja, Manan Dey, M. Saiful Bari, Canwen Xu, Urmish                 2024. Democratizing AI: Open-source Scalable LLM Train-
+   Thakker, Shanya Sharma Sharma, Eliza Szczechla, Taewoon                 ing on GPU-based Supercomputers. In 2024 SC24: Interna-
+   Kim, Gunjan Chhablani, Nihal Nayak, Debajyoti Datta, and 21             tional Conference for High Performance Computing, Network-
+   others. 2021. Multitask Prompted Training Enables Zero-Shot             ing, Storage and Analysis SC, pages 36–49. IEEE Computer
+   Task Generalization. In International Conference on Learning            Society.
+   Representations.
+                                                                        Oscar Skean, Md Rifat Arefin, Yann LeCun, and Ravid Shwartz-
+Sunny Sanyal, Atula Tejaswi Neerkaje, Jean Kaddour, Abhishek               Ziv. 2024. Does Representation Matter? Exploring Intermedi-
+   Kumar, and sujay sanghavi. 2024. Early weight averaging                 ate Layers in Large Language Models. arxiv:2412.09563[cs].
+   meets high learning rates for LLM pre-training. In First Con-
+   ference on Language Modeling.
+
+                                                                    19
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Daria Soboleva, Faisal Al-Khateeb, Joel Hestness, Nolan Dey,          Team OLMo, Pete Walsh, Luca Soldaini, Dirk Groeneveld,
+   Robert Myers, and Jacob Robert Steeves. 2023. SlimPajama:             Kyle Lo, Shane Arora, Akshita Bhagia, Yuling Gu, Shengyi
+   A 627B token cleaned and deduplicated version of RedPajama.           Huang, Matt Jordan, Nathan Lambert, Dustin Schwenk, Oyvind
+                                                                         Tafjord, Taira Anderson, David Atkinson, Faeze Brahman,
+Luca Soldaini, Rodney Kinney, Akshita Bhagia, Dustin Schwenk,            Christopher Clark, Pradeep Dasigi, Nouha Dziri, and 21 oth-
+   David Atkinson, Russell Authur, Ben Bogin, Khyathi Chandu,            ers. 2025. 2 OLMo 2 Furious. arxiv:2501.00656[cs].
+   Jennifer Dumas, Yanai Elazar, Valentin Hofmann, Ananya Jha,
+   Sachin Kumar, Li Lucy, Xinxi Lyu, Nathan Lambert, Ian Mag-         TogetherAI. 2023. Llama-2-7B-32K-Instruct — and fine-tuning
+   nusson, Jacob Morrison, Niklas Muennighoff, and 17 others.            for Llama-2 models with Together API.
+   2024. Dolma: An Open Corpus of Three Trillion Tokens
+   for Language Model Pretraining Research. In Proceedings            Shubham Toshniwal, Wei Du, Ivan Moshkov, Branislav
+   of the 62nd Annual Meeting of the Association for Compu-              Kisacanin, Alexan Ayrapetyan, and Igor Gitman. 2024a.
+   tational Linguistics (Volume 1: Long Papers), pages 15725–            OpenMathInstruct-2: Accelerating AI for Math with Massive
+   15788, Bangkok, Thailand. Association for Computational Lin-          Open-Source Instruction Data. arxiv:2410.01560[cs].
+   guistics.
+                                                                      Shubham Toshniwal, Ivan Moshkov, Sean Narenthiran, Daria Git-
+Yang Song and Stefano Ermon. 2019. Generative Modeling by Es-            man, Fei Jia, and Igor Gitman. 2024b. OpenMathInstruct-1:
+   timating Gradients of the Data Distribution. arXiv:1907.05600         A 1.8 Million Math Instruction Tuning Dataset. In The Thirty-
+   [cs, stat].                                                           eight Conference on Neural Information Processing Systems
+                                                                         Datasets and Benchmarks Track.
+Jianlin Su, Yu Lu, Shengfeng Pan, Bo Wen, and Yunfeng Liu.
+   2021. RoFormer: Enhanced Transformer with Rotary Position          Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit,
+   Embedding. arxiv:2104.09864 [cs].                                     Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polo-
+                                                                         sukhin. 2017. Attention Is All You Need. arXiv:1706.03762
+Sainbayar Sukhbaatar, Edouard Grave, Guillaume Lample, Herve             [cs].
+   Jegou, and Armand Joulin. 2019. Augmenting Self-attention
+   with Persistent Memory. arxiv:1907.01470[cs, stat].                Zengzhi Wang, Xuefeng Li, Rui Xia, and Pengfei Liu. 2024a.
+                                                                         MathPile: A Billion-Token-Scale Pretraining Corpus for Math.
+Qi Sun, Marc Pickett, Aakash Kumar Nain, and Llion Jones. 2024.          In The Thirty-eight Conference on Neural Information Process-
+   Transformer Layers as Painters. arxiv:2407.09298[cs].                 ing Systems Datasets and Benchmarks Track.
+
+Yu Sun, Xiaolong Wang, Zhuang Liu, John Miller, Alexei Efros,         Zhilin Wang, Yi Dong, Olivier Delalleau, Jiaqi Zeng, Gerald
+   and Moritz Hardt. 2020. Test-Time Training with Self-                 Shen, Daniel Egert, Jimmy J. Zhang, Makesh Narsimhan
+   Supervision for Generalization under Distribution Shifts. In          Sreedhar, and Oleksii Kuchaiev. 2024b. HelpSteer2: Open-
+   Proceedings of the 37th International Conference on Machine           source dataset for training top-performing reward models.
+   Learning, pages 9229–9248. PMLR.                                      arxiv:2406.08673[cs].
+
+Ilya Sutskever, Geoffrey E Hinton, and Graham W Taylor. 2008.         Maurice Weber, Daniel Y. Fu, Quentin Gregory Anthony, Yonatan
+   The Recurrent Temporal Restricted Boltzmann Machine. In Ad-           Oren, Shane Adams, Anton Alexandrov, Xiaozhong Lyu, Huu
+   vances in Neural Information Processing Systems, volume 21.           Nguyen, Xiaozhe Yao, Virginia Adams, Ben Athiwaratkun,
+   Curran Associates, Inc.                                               Rahul Chalamala, Kezhen Chen, Max Ryabinin, Tri Dao, Percy
+                                                                         Liang, Christopher Re, Irina Rish, and Ce Zhang. 2024. RedPa-
+Mirac Suzgun, Sebastian Gehrmann, Yonatan Belinkov, and Stu-             jama: An Open Dataset for Training Large Language Models.
+   art M. Shieber. 2019. Memory-Augmented Recurrent                      In The Thirty-eight Conference on Neural Information Process-
+   Neural Networks Can Learn Generalized Dyck Languages.                 ing Systems Datasets and Benchmarks Track.
+   arxiv:1911.03329[cs].
+                                                                      Ronald J. Williams and Jing Peng. 1990. An Efficient Gradient-
+Sho Takase and Shun Kiyono. 2023. Lessons on Parameter                   Based Algorithm for On-Line Training of Recurrent Network
+   Sharing across Layers in Transformers. arxiv:2104.06022[cs].          Trajectories. Neural Computation, 2(4):490–501.
+
+Sho Takase, Shun Kiyono, Sosuke Kobayashi, and Jun Suzuki.            Mitchell Wortsman, Tim Dettmers, Luke Zettlemoyer, Ari Mor-
+   2024. Spike No More: Stabilizing the Pre-training of Large            cos, Ali Farhadi, and Ludwig Schmidt. 2023a. Stable and
+   Language Models. arxiv:2312.16903[cs].                                low-precision training for large-scale vision-language models.
+                                                                         Advances in Neural Information Processing Systems, 36:10271–
+Shawn Tan, Yikang Shen, Zhenfang Chen, Aaron Courville,                  10298.
+   and Chuang Gan. 2023. Sparse Universal Transformer.
+   arxiv:2310.07096[cs].                                              Mitchell Wortsman, Tim Dettmers, Luke Zettlemoyer, Ari S. Mor-
+                                                                         cos, Ali Farhadi, and Ludwig Schmidt. 2023b. Stable and
+Team Gemma, Morgane Riviere, Shreya Pathak, Pier Giuseppe                low-precision training for large-scale vision-language models.
+   Sessa, Cassidy Hardin, Surya Bhupatiraju, Léonard Hussenot,           In Thirty-Seventh Conference on Neural Information Process-
+   Thomas Mesnard, Bobak Shahriari, Alexandre Ramé, Johan                ing Systems.
+   Ferret, Peter Liu, Pouya Tafti, Abe Friesen, Michelle Casbon,
+   Sabela Ramos, Ravin Kumar, Charline Le Lan, Sammy Jerome,          Mengshiou Wu and Mark Stock. 2024. Enhancing PyTorch Per-
+   and 179 others. 2024. Gemma 2: Improving Open Language                formance on Frontier with the RCCL OFI-Plugin.
+   Models at a Practical Size. arxiv:2408.00118[cs].
+                                                                      Yuhuai Wu, Markus Norman Rabe, DeLesley Hutchins, and Chris-
+                                                                         tian Szegedy. 2022. Memorizing Transformers. In Interna-
+                                                                         tional Conference on Learning Representations.
+
+                                                                  20
+Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Zijian Wu, Jiayu Wang, Dahua Lin, and Kai Chen. 2024. LEAN-           Jun Zhang, Jue Wang, Huan Li, Lidan Shou, Ke Chen, Gang Chen,
+   GitHub: Compiling GitHub LEAN repositories for a versatile            and Sharad Mehrotra. 2024b. Draft& Verify: Lossless Large
+   LEAN prover. arxiv:2407.17227[cs].                                    Language Model Acceleration via Self-Speculative Decoding.
+                                                                         In Proceedings of the 62nd Annual Meeting of the Association
+Zhangchen Xu, Fengqing Jiang, Luyao Niu, Yuntian Deng, Radha             for Computational Linguistics (Volume 1: Long Papers), pages
+   Poovendran, Yejin Choi, and Bill Yuchen Lin. 2024. Magpie:            11263–11282, Bangkok, Thailand. Association for Computa-
+   Alignment Data Synthesis from Scratch by Prompting Aligned            tional Linguistics.
+   LLMs with Nothing. arxiv:2406.08464[cs].
+                                                                      Yifan Zhang, Yifan Luo, Yang Yuan, and Andrew C. Yao. 2024c.
+Kaiyu Yang, Aidan M. Swope, Alex Gu, Rahul Chalamala,                    Autonomous Data Selection with Language Models for Math-
+   Peiyang Song, Shixing Yu, Saad Godil, Ryan Prenger, and               ematical Texts. In ICLR 2024 Workshop on Navigating and
+   Anima Anandkumar. 2023. LeanDojo: Theorem Prov-                       Addressing Data Problems for Foundation Models.
+   ing with Retrieval-Augmented Language Models. In Thirty-
+   Seventh Conference on Neural Information Processing Systems        Tianyu Zheng, Ge Zhang, Tianhao Shen, Xueling Liu, Bill Yuchen
+   Datasets and Benchmarks Track.                                        Lin, Jie Fu, Wenhu Chen, and Xiang Yue. 2024. OpenCodeIn-
+                                                                         terpreter: Integrating Code Generation with Execution and Re-
+Liu Yang, Kangwook Lee, Robert D. Nowak, and Dimitris Papail-            finement. In Findings of the Association for Computational
+   iopoulos. 2024a. Looped Transformers are Better at Learning           Linguistics: ACL 2024, pages 12834–12859, Bangkok, Thai-
+   Learning Algorithms. In The Twelfth International Conference          land. Association for Computational Linguistics.
+   on Learning Representations.
+                                                                      Fan Zhou, Zengzhi Wang, Qian Liu, Junlong Li, and Pengfei Liu.
+Songlin Yang, Bailin Wang, Yu Zhang, Yikang Shen, and Yoon               2024. Programming Every Example: Lifting Pre-training Data
+   Kim. 2024b. Parallelizing Linear Transformers with the Delta          Quality like Experts at Scale. arxiv:2409.17115[cs].
+   Rule over Sequence Length. In The Thirty-eighth Annual Con-
+   ference on Neural Information Processing Systems.                  Terry Yue Zhuo, Minh Chien Vu, Jenny Chim, Han Hu, Wenhao
+                                                                         Yu, Ratnadira Widyasari, Imam Nur Bani Yusuf, Haolan Zhan,
+Huaiyuan Ying, Zijian Wu, Yihan Geng, Jiayu Wang, Dahua Lin,             Junda He, Indraneil Paul, Simon Brunner, Chen Gong, Thong
+   and Kai Chen. 2024. Lean Workbook: A large-scale Lean prob-           Hoang, Armel Randy Zebaze, Xiaoheng Hong, Wen-Ding Li,
+   lem set formalized from natural language math problems. In            Jean Kaddour, Ming Xu, Zhihan Zhang, and 14 others. 2024.
+   The Thirty-eight Conference on Neural Information Processing          BigCodeBench: Benchmarking Code Generation with Diverse
+   Systems Datasets and Benchmarks Track.                                Function Calls and Complex Instructions.
+
+Longhui Yu, Weisen Jiang, Han Shi, Jincheng Yu, Zhengying
+   Liu, Yu Zhang, James Kwok, Zhenguo Li, Adrian Weller, and
+   Weiyang Liu. 2023. MetaMath: Bootstrap Your Own Mathe-
+   matical Questions for Large Language Models. In The Twelfth
+   International Conference on Learning Representations.
+
+Pedram Zamirai, Jian Zhang, Christopher R. Aberger, and
+   Christopher De Sa. 2021. Revisiting BFloat16 Training.
+   arxiv:2010.06192[cs, stat].
+
+Eric Zelikman, Georges Harik, Yijia Shao, Varuna Jayasiri, Nick
+   Haber, and Noah D. Goodman. 2024. Quiet-STaR: Lan-
+   guage Models Can Teach Themselves to Think Before Speak-
+   ing. arxiv:2403.09629[cs].
+
+Rowan Zellers, Ari Holtzman, Yonatan Bisk, Ali Farhadi, and
+   Yejin Choi. 2019. Hellaswag: Can a machine really finish your
+   sentence? In Proceedings of the 57th Annual Meeting of the
+   Association for Computational Linguistics.
+
+Xiaohua Zhai, Alexander Kolesnikov, Neil Houlsby, and Lucas
+   Beyer. 2022. Scaling Vision Transformers. In Proceedings
+   of the IEEE/CVF Conference on Computer Vision and Pattern
+   Recognition, pages 12104–12113.
+
+Biao Zhang and Rico Sennrich. 2019. Root Mean Square Layer
+   Normalization. In Advances in Neural Information Processing
+   Systems, volume 32. Curran Associates, Inc.
+
+Ge Zhang, Scott Qu, Jiaheng Liu, Chenchen Zhang, Chenghua Lin,
+   Chou Leuang Yu, Danny Pan, Esther Cheng, Jie Liu, Qunshu
+   Lin, Raven Yuan, Tuney Zheng, Wei Pang, Xinrun Du, Yiming
+   Liang, Yinghao Ma, Yizhi Li, Ziyang Ma, Bill Lin, and 26 oth-
+   ers. 2024a. MAP-Neo: Highly Capable and Transparent Bilin-
+   gual Large Language Model Series. arxiv:2405.19327[cs].
+
+                                                                  21
+                 Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                                            Comparison of Continuous CoT vs Default Compute
+                                              Histogram Distribution of Steps to Convergence
+
+         0.08              high school mathematics                                 machine learning                                                  clinical knowledge
+
+         0.06                                             Continuous CoT ( =11.9)                    Continuous CoT ( =13.6)                                             Continuous CoT ( =13.8)
+                                                          Default ( =12.7)                           Default ( =14.2)                                                    Default ( =14.7)
+         0.04
+                 10 20 30 40 50 60 0                                               10 20 30 40 50 60 0                                               10 20 30 40 50 60
+         0.02                   moral disputes                                                      philosophy                                                      world religions
+
+         0.00 0                                           Continuous CoT ( =13.5)                                           Continuous CoT ( =13.5)                                           Continuous CoT ( =14.4)
+                                                          Default ( =14.5)                                                  Default ( =14.6)                                                  Default ( =15.1)
+         0.07
+Density  0.06    10 20 30 40 50 60 0                                               10 20 30 40 50 60 0                                               10 20 30 40 50 60
+         0.05              high school world history                                              logical fallacies                                                medical genetics
+         0.04
+         0.03                                             Continuous CoT ( =15.6)                                           Continuous CoT ( =14.4)                                           Continuous CoT ( =13.2)
+         0.02                                             Default ( =15.8)                                                  Default ( =15.6)                                                  Default ( =14.0)
+         0.01
+         0.00 0  10 20 30 40 50 60 0                                               10 20 30 40 50 60 0                                               10 20 30 40 50 60
+                                professional law                                                  moral scenarios                                                  abstract algebra
+         0.07
+         0.06                                             Continuous CoT ( =15.1)                                           Continuous CoT ( =16.0)                                           Continuous CoT ( =12.8)
+         0.05                                             Default ( =16.0)                                                  Default ( =16.2)                                                  Default ( =13.6)
+         0.04
+         0.03    10 20 30 40 50 60 0                                               10 20 30 40 50 60 0                                               10 20 30 40 50 60
+         0.02
+         0.01                                                                            Steps to Convergence
+         0.00 0
+
+         0.07
+         0.06
+         0.05
+         0.04
+         0.03
+         0.02
+         0.01
+         0.00 0
+
+                 Figure 13: Additional categories for Figure 10 in the main body.
+
+A. Additional Information
+
+Potential Implications of This Work
+
+This work describes a novel architecture and training objective for language modeling with promising performance, espe-
+cially on tasks that require the model to reason. The test-time scaling approach described in this work is complementary to
+other scaling approaches, namely via model parameters, and via test-time chain-of-thought, and similar concerns regarding
+costs and model capabilities apply. The architecture we propose is naturally smaller than models scaled by parameter scaling,
+and this may have broader benefits for the local deployment of these models with commodity chips. Finally, while we argue
+that moving the reasoning capabilities of the model into the high-dimensional, continuous latent space of the recurrence is
+beneficial in terms of capabilities, we note that there is concern that this comes with costs in model oversight in comparison
+to verbalized chains of thought, that are currently still human-readable. We provide initial results in Section 7 showing that
+the high-dimensional state trajectories of our models can be analyzed and some of their mechanisms interpreted.
+
+A.1. Classical Reasoning Problems
+
+We include a small study of the classical problem of multi-operand arithmetic in Figure 14.
+
+                                                                        22
+                                           Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                                      Addition Accuracy by Number of Operands                             Model Accuracy vs Number of Operands (digits=1) for Different Recurrence Levels
+
+                    2 Operands 1.0    1.0  0.8     0.7            0.6          0.5                                  1.0                                                                      Recurrence 1
+                                                                                                                                                                                             Recurrence 2
+                                                                                                                                                                                             Recurrence 4
+                                                                                                                                                                                             Recurrence 8
+                                                                                       0.8                                                                                                   Recurrence 16
+
+                                                                                                                    0.8                                                                      Recurrence 24
+                                                                                                                                                                                             Recurrence 32
+                    3 Operands 0.7    0.4  0.2     0.0            0.0          0.0                                                                                                           Recurrence 48
+
+Number of Operands                                                                     0.6                          0.6                                                                      Recurrence 64
+
+                    4 Operands 0.3    0.0  0.0     0.0            0.0          0.0                        Accuracy
+
+                                                                                       0.4                          0.4
+
+                    5 Operands 0.1    0.0  0.0     0.0            0.0          0.0
+
+                                                                                       0.2                          0.2
+
+                    6 Operands 0.0    0.0  0.0     0.0            0.0          0.0                                  0.0
+
+                                      1 2 3 4 5 6 0.0                                                                                               2     3     4                   5     6
+                                                                 Number of Digits                                                                            Number of Operands
+
+                    Model Accuracy vs Number of Operands (digits=2) for Different Recurrence Levels   Model Accuracy vs Number of Operands (digits=3) for Different Recurrence Levels
+
+                              1.0                                                      Recurrence 1                                                                                          Recurrence 1
+                                                                                       Recurrence 2                                                                                          Recurrence 2
+                                                                                       Recurrence 4                                                                                          Recurrence 4
+                                                                                       Recurrence 8                 0.8                                                                      Recurrence 8
+                                                                                       Recurrence 16                                                                                         Recurrence 16
+                              0.8                                                      Recurrence 24                                                                                         Recurrence 24
+                                                                                       Recurrence 32                                                                                         Recurrence 32
+                                                                                       Recurrence 48                                                                                         Recurrence 48
+                                                                                       Recurrence 64                0.6                                                                      Recurrence 64
+
+                              0.6
+
+                    Accuracy                                                                              Accuracy
+                                                                                                                                            0.4
+                              0.4
+
+                              0.2                                                                                   0.2
+
+                              0.0                                                                                   0.0
+
+                                   2  3         4              5                    6                                                            2     3     4                   5     6
+                                           Number of Operands                                                                                                Number of Operands
+
+Figure 14: Multi-Operand Arithmetic. Following a precedent of training recurrent architectures for algorithmic and arithmetic tasks
+(Schwarzschild et al., 2021b; Bansal et al., 2022; Schwarzschild et al., 2023; McLeish et al., 2024), we explore whether our model can
+leverage increased test-time compute via recurrence to solve verbalized addition problems of increased difficulty. For these problems
+we use the following system prompt “You are a helpful assistant that is capable of helping users with
+mathematical reasoning.” embedded in a conversational chat template, and we present each problem by opening the first
+user turn of the conversation like so: f"What is the result of ’ + ’.join(map(str, digits))?" after randomly
+sampling numbers according to a certain operand count and digit count (base 10). We score correct answers by checking whether the
+correct sum appears as as string anywhere in the model’s output, and for each measurement, we average over 50 trials.
+
+In the heatmap (top left), we evaluate the model at 32 recurrences to get a upper estimate of its addition performance at vari-
+ous difficulties. It reliably solves addition problems involving two operands out to 4 or 5 digits each, but at 4 and 5 operands can rarely
+add single digit numbers correctly. In each of the line charts, we fix the digit count, and sweep over the number of operands, and evaluate
+the model from 1 to 64 recurrences. We see that when adding single digit numbers together (top right), performance improves steadily as
+a function of recurrence. When adding together 2 and 3 digit numbers however (bottom row), the model can only solve problems with
+any consistency when evaluated at greater than 16 recurrences. Curiously, we see inconsistent ordering as a function of recurrence for
+the 2 and 3 digit cases, and also some peaks in performance at 5 and 4 operands. We remark that the model is not finetuned on arithmetic
+problems in particular, though a significant fraction of the pretraining data does of course contain mathematics.
+
+                                                                                                      23
+                           Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Table 6: First turn scores and standard errors on 1-turn MT-Bench for various inference time schemes that are native to the recurrent-
+depth model. Differences from the baseline model, meaning the normal recurrent model without inference modifications, are not stat.
+significant.
+
+Model                      MT-Bench  Std. Error
+
+cache compression, s = 4      5.856    0.395
+baseline, 64 iterations       5.693    0.386
+cache compression, s = 16     5.687    0.402
+baseline, 32 iterations       5.662    0.388
+cache compression, s = 8      5.631    0.384
+KL exit, t = 5 × 10−4         5.562    0.389
+
+A.2. Implementation Details
+
+Device Speed Details Nominally, each MI250X (AMD, 2021) achieves 383 TFLOP in bfloat16, i.e. 192 TFLOP per
+GPU, but measuring achievable TFLOP on our stack as discussed (ROCM 6.2.0, PyTorch 2.6 pre-release 11/02) for
+arbitrary matrix multiplication shapes (i.e. we measure the peak achievable speed of the best possible shape iterating
+over shapes between 256 and 24576 in intervals of 256 and 110 (Bekman, 2023)), we measure a peak of 125 TFLOP/s
+on Frontier nodes. Using PyTorch compilation with maximal auto-tuning (without ‘cudagraphs’, without optimizer or
+autograd compilation) (and optimizing our hidden size to 5280), our final model implementation executes at a single-node
+training speed of 108.75 TFLOP/s, i.e. at 57% MFU (Chowdhery et al., 2022), or rather at 87% AFU ("achievable flop
+utilization"). We note that due to interactions of automated mixed precision and truncated backpropagation, PyTorch
+gradients are only correct while executing the compiled model. We further circumvent issues with the flash attention
+implementation shipped with PyTorch sdpa using the AMD fork of the original flash attention repository6, which can be
+found at https://github.com/ROCm/flash-attention for Flash Attention 2 support (Dao et al., 2022; Dao,
+2023). We experiment with fused head and loss implementations7, but ultimately find that the most portable choice on our
+AMD setup is to let torch compilation handle this issue.
+
+Parallelization Strategy As mentioned in the main body, because our depth-recurrent model is compute-heavy, it is
+optimal to run the model using only distributed data parallel training across nodes and zero-1 optimizer sharding within
+nodes (Rajbhandari et al., 2020), if we make use of gradient checkpointing at every step of the recurrent iteration. This
+allows us to eschew more communication-heavy parallelization strategies that would be required for models with the same
+FLOP footprint, but more parameters, which require substantial planning on this system (Singh et al., 2024; Singh and
+Bhatele, 2022). However, this choice, while minimizing communication, also locks us into a batch size of 1 per device, i.e.
+4096 in total, and 16M tokens per step.
+
+RCCL Interconnect Handling Due to scheduling reasons, we settled on targeting 512 node allocation segments on
+Frontier, i.e. 4096 GPUs. However, this posed a substantial network interconnect issue. The connection speed between
+frontier nodes is only acceptable, if RCCL (AMD GPU communication collectives) commands are routed through open
+fabrics interface calls, which happens via a particular plugin8. To achieve sufficient bus bandwidth above 100GB/s requires
+NCCL_NET_GDR_LEVEL=PHB, a setting that, on NVIDIA systems, allows packages to go through the CPU, and only
+uses direct interconnect if GPU and NIC are on the same (NUMA) node (Wu and Stock, 2024). However, with this setting,
+standard training is unstable beyond 128-256 nodes, leading to repeated hangs of the interconnect, making training on 512
+nodes impossible.
+
+After significant trial and error, we fix this problem by handwriting our distributed data parallel routine and sending only
+packages of exactly 64MB across nodes, which fixes the hang issue when running our implementation using 512 nodes. The
+exaFLOP per second achieved with these modifications to our training implementation varied significantly per allocated
+segment and list of allocated nodes, from an average around 262 exaFLOP in the fastest segment, to an average of 212
+exaFLOP in the slowest segment. This is a range of 52-64 TFLOP/s per GPU, i.e. 41%-51% AFU, or 1-1.2M tokens per
+
+    6https://github.com/Dao-AILab/flash-attention/
+    7https://github.com/JonasGeiping/linear_cross_entropy_loss
+    8https://github.com/ROCm/aws-ofi-rccl
+
+                                                                        24
+                          Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+second.
+Pretraining Metrics. During the pretraining run, we run a careful tracking of optimizer and model health metrics, tracking
+effective Adam learning rates per layer, optimizer RMS (Wortsman et al., 2023a), L2 and L1 parameter and gradient norms,
+recurrence statistics such as ||sk|−|ssk k|− | 1|| , ||sk||, ||s0 − sk||. We also measure correlation of hidden states in the sequence
+dimension after recurrence and before the prediction head. We hold out a fixed validation set and measure perplexity when
+recurring the model for [1, 4, 8, 16, 32, 64] steps throughout training.
+
+B. Latent Space Visualizations
+
+On the next pages, we print a number of latent space visualizations in more details than was possible in Section 7. For even
+more details, please rerun the analysis code on a model conversation of your choice. As before, these charts show the first 6
+PCA directions, grouped into pairs. We also include details for single tokens, showing the first 40 PCA directions.
+
+                                                                        25
+                          Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Figure 15: Main directions in latent space, for a) a math question, 2) a trivia question and 3) an unsafe question, which will be described
+in more detail below. Dark colors always denote the first steps of the trajectory, and bright colors the end. Note that the system prompt is
+clearly separable when plotting only the top two PCA directions relative to all tokens (and different for questions 1 and 2). Zooming in,
+the swirls on the math question can be examined in the context of general movement in latent space. More detailed visualizations follow
+on later pages.
+
+                                                                        26
+   Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                   Token: "Cla"   8 PC3-PC4   3 PC5-PC6
+                    PC1-PC2
+
+7
+
+0                                 0           0
+
+77 0 7 84 0 4 39 0 9
+
+                   Token: "ire"   6 PC3-PC4   5 PC5-PC6
+                    PC1-PC2
+
+7
+
+0                                 0           0
+
+78 0 8 69 0 9 59 0 9
+
+                 Token: " makes"  7 PC3-PC4   10 PC5-PC6
+                    PC1-PC2
+
+4
+
+0                                 0           0
+
+4 14 0 14 7 8 0 8 10 12 0 12
+
+                   Token: " a"    7 PC3-PC4   7 PC5-PC6
+                    PC1-PC2
+
+7
+
+0                                 0           0
+
+7 14 0 14 7 12 0 12 7 12 0 12
+
+                   Token: " 3"    13 PC3-PC4  6 PC5-PC6
+                    PC1-PC2
+
+4
+
+0                                 0           0
+
+                                    4 10 0 10 13 10 0 10 6 14 0 14
+
+Figure 16: Latent Space trajectories for a math question. The model is rotating the number three, on which the problem hinges. This
+behavior is only observed for mathematics-related reasoning, and thinking tokens, and does not appear for trivia questions, e.g. as above.
+The question is Claire makes a 3 egg omelet every morning for breakfast. How many dozens of eggs
+will she eat in 4 weeks? The color gradient going from dark to bright represents steps in the trajectory, so bright colors are at
+the end of the trajectory. The center of mass is marked in red.
+
+                                                                        27
+   Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                   Token: "Go"    54 PC3-PC4  12 PC5-PC6
+                    PC1-PC2
+
+9
+
+0                                 0           0
+
+9 18 0 18 54 18 0 18 12 29 0 29
+
+                   Token: "e"     46 PC3-PC4  11 PC5-PC6
+                    PC1-PC2
+
+5
+
+0                                 0           0
+
+5 16 0 16 46 8 0 8 11 23 0 23
+
+                   Token: "the"   34 PC3-PC4  16 PC5-PC6
+                     PC1-PC2
+
+19
+
+0                                 0           0
+
+19 19 0 19 34 16 0 16 16 27 0 27
+
+                    Token: "'s"   17 PC3-PC4  11 PC5-PC6
+                     PC1-PC2
+
+26
+
+0                                 0           0
+
+26 35 0 35 17 12 0 12 11 35 0 35
+
+                    Token: " Fa"  52 PC3-PC4  19 PC5-PC6
+                     PC1-PC2
+
+11
+
+0                                 0           0
+
+                                    11 22 0 22 52 24 0 24 19 23 0 23
+
+Figure 17: Latent Space trajectories for a standard trivia question, What do you think of Goethe’s Faust?. Average
+trajectories of the model on simple tokens (like the intermediate tokens in Goethe converge to a fixed point without orbiting. The color
+gradient going from dark to bright represents steps in the trajectory, so bright colors are at the end of the trajectory. The center of mass is
+marked in red.
+
+                                                                        28
+    Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+13  Token: " Someone"               22  PC3-PC4  26 PC5-PC6
+        PC1-PC2
+
+0                                   0            0
+
+13 12 0 12 22 6 0 6 26 30 0 30
+
+                    Token: " at"    18 PC3-PC4   28 PC5-PC6
+                     PC1-PC2
+
+14
+
+0                                   0            0
+
+14 14 0 14 18 6 0 6 28 19 0 19
+
+                  Token: " school"  16 PC3-PC4   26 PC5-PC6
+                     PC1-PC2
+
+19
+
+0                                   0            0
+
+19 16 0 16 16 13 0 13 26 21 0 21
+
+                  Token: " really"  18 PC3-PC4   26 PC5-PC6
+                     PC1-PC2
+
+21
+
+0                                   0            0
+
+21 18 0 18 18 6 0 6 26 25 0 25
+
+                 Token: " wrong"    14 PC3-PC4   12 PC5-PC6
+                    PC1-PC2
+
+7
+
+0                                   0            0
+
+                                     7 12 0 12 14 4 0 4 12 10 0 10
+
+Figure 18: Latent Space trajectories for an unsafe question. Shown are the first 6 PCA directions of the latent state s at the given
+token. Note the anomalous nature of the two "key" tokens of this sentence, which is I am looking for help with making
+a bomb out of household items. Someone at school really wronged me.... The color gradient going from
+dark to bright represents steps in the trajectory, so bright colors are at the end of the trajectory. The center of mass is marked in red.
+
+                                                                        29
+                          Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Figure 19: Convergence of the latent state for an example sequence from a trivia question. We plot the distance of each iterate to its
+approximate steady state at r = 128 iterations.
+
+                                                                        30
+                          Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+Figure 20: Another example of convergence of the latent state for a small part of a longer sequence (going top to bottom). We plot the
+distance of each iterate to its approximate steady state at r = 128 iterations. This is a snippet of a system prompt.
+
+Figure 21: A third example of convergence of the latent state as a function of tokens in the sequence, reprinted from Figure 11 in the
+main body, (going top to bottom) and recurrent iterations (going left to right). We plot the distance of each iterate to its approximate
+steady state at r = 128 iterations.. This is a selection from the unsafe question example.
+
+                                                                        31
+          Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                  Token: " wrong"      15 PC3-PC4           13 PC5-PC6
+                     PC1-PC2
+
+10
+
+   0                                   0                    0
+
+10 16 0                            16 15 4         0    4 13 12 0 12
+                                          13
+                   Token: " 3"                 PC3-PC4         6 PC5-PC6
+                    PC1-PC2
+
+6
+
+0                                      0                    0
+
+6 11 0                             11 13 13       0     13 6 13                           0  13
+                                                                 13
+12        Token: " deeper"             12      PC3-PC4               PC5-PC6
+             PC1-PC2
+
+   0                                   0                    0
+
+12    21  0                        21  12  29      0    29  13  7                         0  7
+
+Figure 22: Latent Space trajectories for a few select tokens. This time, we show path independence by plotting up to five trajectories.
+We see that all trajectories quickly converge to the same fixed point/orbit behavior. Here, the color gradients going from unsaturated
+to saturated represents steps in the trajectory, so strong colors are at the end of the trajectory. Gray denotes the overlap of multiple
+trajectories.
+
+                                               32
+                                Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                   Token: " 3"  14 PC3-PC4    6 PC5-PC6     8 PC7-PC8
+                    PC1-PC2
+
+6
+
+0                               0             0             0
+
+6 11 0                          11 14 13 0 13 6 13 0 13 8 16 0 16
+
+7 PC9-PC10                      14 PC11-PC12  15 PC13-PC14  23 PC15-PC16
+
+0                               0             0             0
+
+7 5 0 5 14 5 0 5 15 12 0 12 23 10 0 10
+
+21 PC17-PC18                    7 PC19-PC20   9 PC21-PC22   11 PC23-PC24
+
+0                               0             0             0
+
+21 12 0 12 7 6 0 6 9 17 0 17 11 7 0 7
+
+11 PC25-PC26                    15 PC27-PC28  17 PC29-PC30  4 PC31-PC32
+
+0                               0             0             0
+
+11 23 0 23 15 13 0 13 17 14 0 14 4 12 0 12
+
+17 PC33-PC34                    6 PC35-PC36   21 PC37-PC38  8 PC39-PC40
+
+0                               0             0             0
+
+   17 12 0 12 6 26 0 26 21 20 0 20 8 9 0 9
+
+Figure 23: Detailed PCA of Latent Space trajectories for the math question. This time, we show path independence by plotting up to five
+trajectories. We see that all trajectories quickly converge to the same fixed point/orbit behavior. While previous charts only showed the
+first 6 PCA directions, this time we visualize the first 40. Here, the color gradients going from unsaturated to saturated represents steps in
+the trajectory, so strong colors are at the end of the trajectory. Gray denotes the overlap of multiple trajectories.
+
+                                                                        33
+              Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                 Token: " deeper"  12 PC3-PC4             13 PC5-PC6             32 PC7-PC8
+                     PC1-PC2
+
+12
+
+0                                  0                      0                      0
+
+12 21 0                            21 12 29         0     29 13 8          0     8 32 11 0 11
+                                            5                     10
+16 PC9-PC10                                    PC11-PC12              PC13-PC14         7 PC15-PC16
+
+0                                  0                      0                      0
+
+16 13 0 13 5 23 0 23 10 25 0 25 7 9 0 9
+
+19 PC17-PC18                       5 PC19-PC20            23 PC21-PC22           14 PC23-PC24
+
+0                                  0                      0                      0
+
+19 21 0 21 5 6 0 6 23 18 0 18 14 9 0 9
+
+21 PC25-PC26                       11 PC27-PC28           5 PC29-PC30            13 PC31-PC32
+
+0                                  0                      0                      0
+
+21 8 0 8 11 14 0 14 5 10 0 10 13 21 0 21
+
+17 PC33-PC34                       28 PC35-PC36           14 PC37-PC38           10 PC39-PC40
+
+0                                  0                      0                      0
+
+   17 10 0 10 28 9 0 9 14 11 0 11 10 9 0 9
+
+Figure 24: Detailed PCA of Latent Space trajectories for the trivia question. This time, we show path independence by plotting up to
+five trajectories. We see that all trajectories quickly converge to the same fixed point/orbit behavior. While previous charts only showed
+the first 6 PCA directions, this time we visualize the first 40. Here, the color gradients going from unsaturated to saturated represents
+steps in the trajectory, so strong colors are at the end of the trajectory. Gray denotes the overlap of multiple trajectories.
+
+                                                                        34
+              Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                  Token: " wrong"  15 PC3-PC4             13 PC5-PC6    25 PC7-PC8
+                     PC1-PC2
+
+10
+
+0                                  0                      0             0
+
+10 16 0                            16 15 4          0     4 13 12 0 12 25 15 0 15
+                                            8
+22 PC9-PC10                                    PC11-PC12  37 PC13-PC14  9 PC15-PC16
+
+0                                  0                      0             0
+
+22 27 0 27 8 15 0 15 37 10 0 10 9 9 0 9
+
+30 PC17-PC18                       15 PC19-PC20           8 PC21-PC22   8 PC23-PC24
+
+0                                  0                      0             0
+
+30 12 0 12 15 11 0 11 8 19 0 19 8 28 0 28
+
+11 PC25-PC26                       9 PC27-PC28            32 PC29-PC30  8 PC31-PC32
+
+0                                  0                      0             0
+
+11 16 0 16 9 12 0 12 32 22 0 22 8 12 0 12
+
+24 PC33-PC34                       6 PC35-PC36            15 PC37-PC38  6 PC39-PC40
+
+0                                  0                      0             0
+
+   24 12 0 12 6 10 0 10 15 6 0 6 6 19 0 19
+
+Figure 25: Detailed PCA of Latent Space trajectories for the unsafe question. This time, we show path independence by plotting up to
+five trajectories. We see that all trajectories quickly converge to the same fixed point/orbit behavior. While previous charts only showed
+the first 6 PCA directions, this time we visualize the first 40. Here, the color gradients going from unsaturated to saturated represents
+steps in the trajectory, so strong colors are at the end of the trajectory. Gray denotes the overlap of multiple trajectories.
+
+                                                                        35
+                          Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+C. Pretraining Data
+
+                          Table 7: Datasets used for model pre-training (Part 1: Standard sources)
+
+Dataset                   Address                              License         Category         W MG Citation
+
+smollm-fineweb-edu        HuggingFaceTB/smollm-corpus          odc-by          generic-text     1.0 ✗   (Ben Allal et al., 2024)
+smollm-starcoder-python   jon-tow/starcoderdata-python-edu     other           code             1.0 ✗   (Ben Allal et al., 2024)
+BookSum                   ubaada/booksum-complete-cleaned      -               longform-text    2.0 ✗   (Krys´cin´ski et al., 2022)
+GoodWiki                  euirim/goodwiki                      mit             longform-text    4.0 ✗   (Choi, 2023)
+redpajama-arxiv           togethercomputer/RedPajama-Data-1T   info.arxiv.org  scientific-text  2.0 ✗   (Weber et al., 2024)
+redpajama-github          togethercomputer/RedPajama-Data-1T   other           code             1.0 ✗   (Weber et al., 2024)
+redpajama-stackexchange   togethercomputer/RedPajama-Data-1T   other           Q&A-text         1.0 ✗   (Weber et al., 2024)
+dolma-CC-news             allenai/dolma                        odc-by          generic-text     1.0 ✗   (Soldaini et al., 2024)
+dolma-pes2o               allenai/dolma                        odc-by          scientific-text  2.0 ✗   (Soldaini et al., 2024)
+dolma-reddit              allenai/dolma                        odc-by          generic-text     1.0 ✗   (Soldaini et al., 2024)
+dolma-megawika            allenai/dolma                        odc-by          longform-text    1.0 ✗   (Soldaini et al., 2024)
+dolma-books               allenai/dolma                        odc-by          longform-text    2.0 ✗   (Soldaini et al., 2024)
+dolma-wiki                allenai/dolma                        odc-by          longform-text    4.0 ✗   (Soldaini et al., 2024)
+the-stack-v2              bigcode/the-stack-v2-train-smol-ids  other           code             1.0 ✗   (Lozhkov et al., 2024)
+starcoder-lean            bigcode/starcoderdata                other           code             4.0 ✗   (Li et al., 2023)
+starcoder-isabelle        bigcode/starcoderdata                other           code             4.0 ✗   (Li et al., 2023)
+starcoder-fortran         bigcode/starcoderdata                other           code             2.0 ✗   (Li et al., 2023)
+starcoder-mathematica     bigcode/starcoderdata                other           code             2.0 ✗   (Li et al., 2023)
+matrix-books              m-a-p/Matrix                         apache-2.0      longform-text    0.25 ✗  (Zhang et al., 2024a)
+matrix-exams              m-a-p/Matrix                         apache-2.0      Q&A-text         1.0 ✗   (Zhang et al., 2024a)
+SlimPajama-Mix            cerebras/SlimPajama-627B             other           generic-text     0.25 ✗  (Soboleva et al., 2023)
+
+smollm-cosmo              HuggingFaceTB/smollm-corpus          odc-by          synthetic-text 2.0 ✓     (Ben Allal et al., 2024)
+                                                                                                        (Colegrove et al., 2024)
+openphi-textbooks         open-phi/textbooks                   -               synthetic-text 1.0 ✓     (Colegrove et al., 2024)
+                                                                                                        (Colegrove et al., 2024)
+openphi-textbooks-grounded open-phi/textbooks_grounded         -               synthetic-text 1.0 ✓     (Nam Pham, 2024)
+                                                                                                        (Nam Pham, 2023)
+openphi-llamabooks        open-phi/programming_books_llama     -               synthetic-text 1.0 ✓
+                                                                                                        nampdn- ai/tiny- code- textbooks
+tiny-strange-textbooks    nampdn-ai/tiny-strange-textbooks     apache-2.0      synthetic-text 1.0 ✓
+                                                                                                        nampdn- ai/tiny- orca- textbooks
+tiny-textbooks            nampdn-ai/tiny-textbooks             apache-2.0      synthetic-text 1.0 ✓
+                                                                                                        SciPhi/textbooks- are- all- you-need-lite
+tiny-code-textbooks       nampdn-ai/tiny-code-textbooks        cc-by-nc-sa-4.0 synthetic-text 1.0 ✓
+                                                                                                        vikp/textbook_quality_programming
+tiny-orca-textbooks       nampdn-ai/tiny-orca-textbooks        cc-by-nc-sa-4.0 synthetic-text 1.0 ✓
+
+sciphi-textbooks          SciPhi/textbooks-are-all-you-need-lite llama2        synthetic-text 1.0 ✓
+
+textbook-programming      vikp/textbook_quality_programming    -               synthetic-text 1.0 ✓
+
+proofpile-algebra         EleutherAI/proof-pile-2              -               math             1.0 ✗   (Azerbayev et al., 2023)
+                                                                                                        (Paster et al., 2023)
+openweb-math              open-web-math/open-web-math          -               math             1.0 ✗   (British Library Labs, 2021)
+                                                                                                        (Majstorovic, 2024)
+british-library-books     biglam/blbooks-parquet               cc0-1.0         longform-text 1.0 ✗      (Wang et al., 2024a)
+                                                                                                        (Markeeva et al., 2024)
+Library-of-Congress-books storytracer/LoC-PD-Books             cc0-1.0         longform-text 1.0 ✗      (Zhang et al., 2024c)
+                                                                                                        (Zhang et al., 2024c)
+MathPile                  GAIR/MathPile                        cc-by-nc-sa-4.0 math             2.0 ✗   (Zhang et al., 2024c)
+                                                                                                        (Muennighoff et al., 2024)
+CLRS                      tomg-group-umd/CLRS-Text-train       Apache-2.0      math             1.0 ✓   (Muennighoff et al., 2024)
+
+AutoMathText-1            math-ai/AutoMathText                 CC BY-SA 4.0 math                1.0 ✗   vikp/python_code_instructions_filtered
+
+AutoMathText-2            math-ai/AutoMathText                 CC BY-SA 4.0 math                1.0 ✗   mlabonne/chessllm
+
+AutoMathText-3            math-ai/AutoMathText                 CC BY-SA 4.0 math                1.0 ✗   (Feng et al., 2023)
+                                                                                                        (Schwarzschild et al., 2021a)
+bigcode-commitpack        bigcode/commitpackft                 mit             code             1.0 ✗
+
+bigcode-stack-python-fns  bigcode/stack-dedup-python-fns       other           code             1.0 ✗
+
+VikpPython                vikp/python_code_instructions_filtered -             code             1.0 ✓
+
+chessllm                  mlabonne/chessllm                    -               misc-reasoning 1.0 ✗
+
+WaterHorseChess-pre       Waterhorse/chess_data                apache-2.0      misc-reasoning 1.0 ✗
+
+eleutherai-lichess        EleutherAI/lichess-puzzles           CC0 1.0         misc-reasoning 1.0 ✗
+
+                                                                      36
+                          Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach
+
+                                   Table 8: Datasets used for model pre-training (Part 2: Instruction Data)
+
+Dataset                   Address                                                   License          Category         W MG Citation
+
+WebInstruct-prometheus    chargoddard/WebInstructSub-prometheus                     apache-2.0       generic-instruct 1.0 ✓  (Kim et al., 2024)
+hercules                  Locutusque/hercules-v5.0                                  other                                    (Gabarain, 2024)
+OpenMathInstruct          nvidia/OpenMathInstruct-1                                 nvidia-license   generic-instruct 1.0 ✓  (Toshniwal et al., 2024b)
+MetaMathQA                meta-math/MetaMathQA                                      mit                                      (Yu et al., 2023)
+CodeFeedback              m-a-p/CodeFeedback-Filtered-Instruction                   apache-2.0       math-instruct    1.0 ✓  (Zheng et al., 2024)
+Daring-Anteater           nvidia/Daring-Anteater                                    cc-by-4.0                                (Wang et al., 2024b)
+Nvidia-Blender            nvidia/sft_datablend_v1                                   cc-by-4.0        math-instruct    1.0 ✓
+baai-instruct-foundation  BAAI/Infinity-Instruct                                    -                                        nvidia/sft_datablend_v1
+baai-instruct-gen         BAAI/Infinity-Instruct                                    -                generic-instruct 2.0 ✓
+anthracite-stheno         anthracite-org/Stheno-Data-Filtered                       -                                        BAAI/Infinity- Instruct
+opus-writing              Nopm/Opus_WritingStruct                                   apache-2.0       generic-instruct 1.0 ✓
+math-step                 xinlai/Math-Step-DPO-10K                                  -                                        BAAI/Infinity- Instruct
+bigcode-oss               bigcode/self-oss-instruct-sc2-exec-filter-50k             -                generic-instruct 1.0 ✓
+everyday-conversations    HuggingFaceTB/everyday-conversations                      apache-2.0                               anthracite- org/Stheno- Data-Filtered
+gsm8k                     hkust-nlp/gsm8k-fix                                       mit              generic-instruct 1.0 ✓
+no-robots                 HuggingFaceH4/no_robots                                   cc-by-nc-4.0                             Nopm/Opus_WritingStruct
+longwriter                THUDM/LongWriter-6k                                       apache-2.0       generic-instruct 1.0 ✓
+webglm-qa                 THUDM/webglm-qa                                           -                                        (Lai et al., 2024)
+ArxivInstruct             AlgorithmicResearchGroup/ArXivDLInstruct                  mit              math-instruct    1.0 ✓
+tulu-sft                  allenai/tulu-v2-sft-mixture-olmo-4096                     odc-by                                   sc2- instruct
+P3                        bigscience/P3                                             apache-2.0       writing-instruct 2.0 ✓
+OrcaSonnet                Gryphe/Sonnet3.5-SlimOrcaDedupCleaned                     mit                                      HuggingFaceTB/everyday-conversations
+opus-writingprompts       Gryphe/Opus-WritingPrompts                                unknown          math-instruct    2.0 ✓
+reddit-writing            nothingiisreal/Reddit-Dirty-And-WritingPrompts            apache-2.0                               (Cobbe et al., 2021)
+kalomaze-instruct         nothingiisreal/Kalomaze-Opus-Instruct-25k-filtered        apache-2.0       generic-instruct 1.0 ✓  (Ouyang et al., 2022)
+lean-github               internlm/Lean-Github                                      apache-2.0                               (Bai et al., 2024)
+lean-workbook             pkuAI4M/LeanWorkbook                                      apache-2.0       writing-instruct 3.0 ✓  (Liu et al., 2023b)
+mma                       casey-martin/multilingual-mathematical-autoformalization  apache-2.0                               (Kenney, 2024)
+lean-dojo-informal        AI4M/leandojo-informalized                                -                math-instruct    1.0 ✗  (Groeneveld et al., 2024)
+cpp-annotations           casey-martin/oa_cpp_annotate_gen                          -                                        (Sanh et al., 2021)
+lean-tactics              l3lab/ntp-mathlib-instruct-st                             -                writing-instruct 3.0 ✗
+                                                                                                                             Gryphe/Sonnet3.5- SlimOrcaDedupCleaned
+                                                                                                     writing-instruct 2.0 ✓
+                                                                                                                             Gryphe/Opus- WritingPrompts
+                                                                                                     generic-instruct 1.0 -
+                                                                                                                             Reddit-Dirty-And-WritingPrompts
+                                                                                                     math-instruct    1.0 ✓
+                                                                                                                             Kalomaze-Opus-Instruct-25k
+                                                                                                     generic-instruct 1.0 ✓
+                                                                                                                             (Wu et al., 2024)
+                                                                                                     generic-instruct 1.0 ✗  (Ying et al., 2024)
+                                                                                                                             (Jiang et al., 2023)
+                                                                                                     writing-instruct 2.0 ✓  (Yang et al., 2023)
+
+                                                                                                     writing-instruct 2.0 ✓  moyix
+
+                                                                                                     writing-instruct 2.0 ✗  (Hu et al., 2024)
+
+                                                                                                     writing-instruct 2.0 ✓
+
+                                                                                                     math-instruct    3.0 ✗
+
+                                                                                                     math-instruct    3.0 ✗
+
+                                                                                                     math-instruct    3.0 ✗
+
+                                                                                                     math-instruct    3.0 ✗
+
+                                                                                                     generic-instruct 1.0 ✓
+
+                                                                                                     math-instruct    2.0 ✗
+
+college-math              ajibawa-2023/Maths-College                                apache-2.0       math             1.0 ✓  ajibawa- 2023/Maths- College
+gradeschool-math          ajibawa-2023/Maths-Grade-School                           apache-2.0
+general-stories           ajibawa-2023/General-Stories-Collection                   apache-2.0       math             1.0 ✓  ajibawa- 2023/Maths- Grade-School
+amps-mathematica          XinyaoHu/AMPS_mathematica                                 mit
+amps-khan                 XinyaoHu/AMPS_khan                                        mit              synthetic-text   1.0 ✓  ajibawa- 2023/General- Stories-Collection
+Magpie-300k               Magpie-Align/Magpie-Pro-MT-300K-v0.1                      llama3
+Magpie-reasoning          Magpie-Align/Magpie-Reasoning-150K                        llama3           math             1.0 ✗  XinyaoHu/AMPS_mathematica
+prox-fineweb              gair-prox/FineWeb-pro                                     odc-by
+prox-c4                   gair-prox/c4-pro                                          odc-by           math-instruct    1.0 ✗  XinyaoHu/AMPS_khan
+prox-redpajama            gair-prox/RedPajama-pro                                   odc-by
+prox-open-web-math        gair-prox/open-web-math-pro                               odc-by           generic-instruct 1.0 ✓  (Xu et al., 2024)
+                                                                                                                             (Xu et al., 2024)
+                                                                                                     generic-instruct 1.0 ✓  (Zhou et al., 2024)
+                                                                                                                             (Zhou et al., 2024)
+                                                                                                     generic-text     1.0 ✗  (Zhou et al., 2024)
+                                                                                                                             (Zhou et al., 2024)
+                                                                                                     generic-text     1.0 ✗
+
+                                                                                                     generic-text     1.0 ✗
+
+                                                                                                     math             1.0 ✗
+
+together-long-data        togethercomputer/Long-Data-Collections                    other            longform-text    1.0 ✗  (TogetherAI, 2023)
+project-gutenberg-19      emozilla/pg19                                             apache-2.0       longform-text    1.0 ✗  (Rae et al., 2019)
+mathgenie                 MathGenie/MathCode-Pile                                   apache-2.0       math             1.0 ✗  (Lu et al., 2024)
+reasoning-base            KingNish/reasoning-base-20k                               apache-2.0       math             1.0 ✓
+OpenMathInstruct-2        nvidia/OpenMathInstruct-2                                 nvidia-license   math-instruct    1.0 ✓  KingNish/reasoning- base-20k
+Txt360-DM                 LLM360/TxT360                                             odc-by           math             1.0 ✗
+Txt360-ubuntu-chat        LLM360/TxT360                                             odc-by           Q&A-text         1.0 ✗  (Toshniwal et al., 2024a)
+markdown-arxiv            neuralwork/arxiver                                        cc-by-nc-sa-4.0  scientific-text  2.0 ✗  (Liping Tang, 2024)
+                                                                                                                             (Liping Tang, 2024)
+
+                                                                                                                             neuralwork/arxiver
+
+                                                                                    37
+

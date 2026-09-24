@@ -682,6 +682,12 @@ enum GraphOp {
         row_idx: usize,
         out: ValueId,
     },
+    GatherRows {
+        src: TensorRef,
+        start: usize,
+        count: usize,
+        out: ValueId,
+    },
     /// Copies a column-slice of a 2D tensor.
     /// For an input of shape [rows, total_cols], copies columns
     /// [col_offset .. col_offset + out_cols) from each row into the output [rows, out_cols].
@@ -726,6 +732,7 @@ impl GraphOp {
             | Self::QkNormRopeKvPrefill { out, .. }
             | Self::Attention { out, .. }
             | Self::GatherRow { out, .. }
+            | Self::GatherRows { out, .. }
             | Self::SliceCols { out, .. }
             | Self::MatMulSlice { out, .. } => Some(*out),
             Self::AddRmsNorm { out, .. } => Some(*out),
@@ -792,6 +799,7 @@ impl GraphOp {
             Self::GatherRow { src, .. } => {
                 maybe_push(&mut values, *src);
             }
+            Self::GatherRows { src, .. } => maybe_push(&mut values, *src),
             Self::SliceCols { input, .. } => {
                 maybe_push(&mut values, *input);
             }
@@ -1242,6 +1250,8 @@ impl KernelWarmRegistry {
 
 pub struct GenerationOutput {
     pub text: String,
+    pub token_ids: Vec<u32>,
+    pub mtp_chunks: Vec<usize>,
     pub prompt_tokens: usize,
     pub generated_tokens: usize,
     pub prompt_elapsed: Duration,
@@ -1259,7 +1269,12 @@ impl GenerationOutput {
 
     pub fn decode_phase_tps(&self) -> f64 {
         let secs = self.decode_elapsed.as_secs_f64().max(1.0e-9);
-        self.generated_tokens as f64 / secs
+        // The first MTP block is timed as prefill, not decode. Do not count its
+        // tokens against the shorter decode-only interval.
+        let tokens = self
+            .generated_tokens
+            .saturating_sub(self.mtp_chunks.first().copied().unwrap_or(0));
+        tokens as f64 / secs
     }
 
     pub fn request_gen_tps(&self) -> f64 {
@@ -1855,6 +1870,112 @@ impl Qwen3Engine {
         Ok(encoding.get_ids().to_vec())
     }
 
+    pub fn mtp_mask_id(&self) -> Result<u32> {
+        self.tokenizer
+            .token_to_id("<|mtp_special_token_0|>")
+            .context("tokenizer has no MTP mask token; supply --mask-id")
+    }
+
+    /// Causal suffix MTP with logical cache truncation. Only real input rows
+    /// become committed cache entries. Mask K/V is overwritten next iteration.
+    pub async fn generate_mtp(
+        &mut self,
+        prompt: &str,
+        max_new_tokens: usize,
+        options: crate::mtp::MtpOptions,
+    ) -> Result<GenerationOutput> {
+        use crate::mtp::{accepted_count, top1};
+        options.validate(self.cfg.vocab_size)?;
+        ensure!(!self.do_sample, "MTP uses greedy readout; disable --sample");
+        self.active_profile = self.profile_enabled.then(RunProfile::new);
+        let prompt_ids = self.encode_prompt(&self.maybe_apply_chat_template(prompt))?;
+        ensure!(!prompt_ids.is_empty(), "empty prompt");
+        ensure!(
+            prompt_ids
+                .len()
+                .checked_add(max_new_tokens)
+                .is_some_and(|n| n <= self.max_seq_len),
+            "requested sequence exceeds max_seq_len={}",
+            self.max_seq_len
+        );
+        self.reset_cache().await?;
+        let start = Instant::now();
+        let mut prompt_elapsed = Duration::ZERO;
+        let mut generated = Vec::new();
+        let mut chunks = Vec::new();
+        let mut pending = prompt_ids.clone();
+        let mut committed = 0;
+        let mut graphs: HashMap<(usize, usize), (StepGraph, TensorPool)> = HashMap::new();
+        while generated.len() < max_new_tokens {
+            let step_start = Instant::now();
+            let k = options.k.min(max_new_tokens - generated.len());
+            let real_rows = pending.len();
+            pending.extend(std::iter::repeat_n(options.mask_id, k - 1));
+            let shape = (pending.len(), k);
+            let logits = with_context(|ctx| {
+                value((|| -> Result<Arc<Tensor<f16>>> {
+                    if !graphs.contains_key(&shape) {
+                        let graph = self.build_step_graph_rows(shape.0, k)?;
+                        let pool = TensorPool::from_plan_ctx(ctx, &graph.pool_plan)?;
+                        graphs.insert(shape, (graph, pool));
+                    }
+                    let (graph, pool) = graphs.get_mut(&shape).unwrap();
+                    self.execute_step_graph_ctx(ctx, graph, pool, &pending, committed)
+                })())
+            })
+            .await??;
+            let host = logits.to_host_vec().await?;
+            self.profile_step(step_start.elapsed(), !chunks.is_empty());
+            if chunks.is_empty() {
+                prompt_elapsed = start.elapsed();
+            }
+            // The just-processed real tokens now have valid K/V. None of the
+            // k-1 placeholder states are retained, even when all k are accepted.
+            committed += real_rows;
+            let predictions = host
+                .chunks_exact(self.cfg.vocab_size)
+                .map(|row| top1(&row.iter().map(|x| x.to_f32()).collect::<Vec<_>>()))
+                .collect::<Result<Vec<_>>>()?;
+            ensure!(predictions.len() == k, "MTP logit shape mismatch");
+            let count = accepted_count(
+                &predictions.iter().map(|p| p.1).collect::<Vec<_>>(),
+                options.strategy,
+            )?;
+            pending.clear();
+            for &(token, _) in &predictions[..count] {
+                pending.push(token);
+                if self.eos_token_ids.contains(&token) {
+                    break;
+                }
+            }
+            chunks.push(pending.len());
+            generated.extend_from_slice(&pending);
+            if pending
+                .last()
+                .is_some_and(|id| self.eos_token_ids.contains(id))
+            {
+                break;
+            }
+        }
+        let total_elapsed = start.elapsed();
+        let profile_report = self.active_profile.take().map(|profile| profile.render());
+        let text = self
+            .tokenizer
+            .decode(&generated, true)
+            .map_err(|e| anyhow::anyhow!("tokenizer decode failed: {e}"))?;
+        Ok(GenerationOutput {
+            text,
+            prompt_tokens: prompt_ids.len(),
+            generated_tokens: generated.len(),
+            token_ids: generated,
+            mtp_chunks: chunks,
+            prompt_elapsed,
+            decode_elapsed: total_elapsed.saturating_sub(prompt_elapsed),
+            total_elapsed,
+            profile_report,
+        })
+    }
+
     pub async fn generate(
         &mut self,
         prompt: &str,
@@ -2065,6 +2186,8 @@ impl Qwen3Engine {
             text,
             prompt_tokens: prompt_ids.len(),
             generated_tokens: generated_ids.len(),
+            token_ids: generated_ids,
+            mtp_chunks: Vec::new(),
             prompt_elapsed,
             decode_elapsed,
             total_elapsed,
@@ -2075,6 +2198,10 @@ impl Qwen3Engine {
     fn maybe_apply_chat_template(&self, prompt: &str) -> String {
         if !self.use_chat_template || prompt.contains("<|im_start|>") {
             return prompt.to_string();
+        }
+        // The Instruct-2507 checkpoint has no thinking preamble in its template.
+        if self.tokenizer.token_to_id("<|mtp_special_token_0|>").is_some() {
+            return format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
         }
         // Match Qwen3 tokenizer template with enable_thinking=false for cleaner direct answers.
         format!(
@@ -3575,7 +3702,15 @@ impl Qwen3Engine {
     }
 
     fn build_step_graph(&self, seqlen: usize) -> Result<StepGraph> {
+        self.build_step_graph_rows(seqlen, 1)
+    }
+
+    fn build_step_graph_rows(&self, seqlen: usize, logit_rows: usize) -> Result<StepGraph> {
         ensure!(seqlen > 0, "step_seq expects at least one token");
+        ensure!(
+            logit_rows > 0 && logit_rows <= seqlen,
+            "invalid logit row count"
+        );
 
         let mut specs = Vec::new();
         let mut ops = Vec::new();
@@ -3862,6 +3997,22 @@ impl Qwen3Engine {
             out: hidden_norm,
         });
 
+        if logit_rows > 1 {
+            let selected = push_value(&mut specs, vec![logit_rows, hidden_size]);
+            ops.push(GraphOp::GatherRows {
+                src: v(hidden_norm),
+                start: seqlen - logit_rows,
+                count: logit_rows,
+                out: selected,
+            });
+            let logits = push_value(&mut specs, vec![logit_rows, self.cfg.vocab_size]);
+            ops.push(GraphOp::MatMul {
+                matrix: TensorRef::Weight(WeightRef::LmHead),
+                rhs: v(selected),
+                out: logits,
+            });
+            return StepGraph::new(ops, specs, logits);
+        }
         let last_hidden = push_value(&mut specs, vec![hidden_size]);
         ops.push(GraphOp::GatherRow {
             src: v(hidden_norm),
@@ -4103,6 +4254,19 @@ impl Qwen3Engine {
                         out_buf,
                     )?;
                     values[out.idx()] = Some(Arc::new(out_tensor));
+                }
+                GraphOp::GatherRows { src, start, count, out } => {
+                    let src = self.resolve_tensor_ref(&values, *src)?;
+                    let out_buf = self.checkout_graph_output_ctx(ctx, graph, pool, *out, final_logits_policy)?;
+                    let width = src.shape()[1] as usize;
+                    ensure!(*start + *count <= src.shape()[0] as usize, "row slice outside tensor");
+                    unsafe {
+                        memcpy_dtod_async::<u8>(out_buf.device_pointer().cu_deviceptr(),
+                            src.device_pointer().cu_deviceptr() + (*start * width * size_of::<f16>()) as u64,
+                            *count * width * size_of::<f16>(), ctx.get_cuda_stream())
+                            .map_err(|e| anyhow::anyhow!("gather rows failed: {e:?}"))?;
+                    }
+                    values[out.idx()] = Some(Arc::new(out_buf));
                 }
                 GraphOp::GatherRow { src, row_idx, out } => {
                     let src = self.resolve_tensor_ref(&values, *src)?;
@@ -5291,11 +5455,6 @@ impl Qwen3Engine {
         let (k_cache, v_cache): (Partition<Tensor<f16>>, Partition<Tensor<f16>>) =
             match position_input {
                 PositionInput::Host(position_start) => {
-                    debug_assert_eq!(
-                        *position_start, 0,
-                        "kv_cache_update_seq_f16 assumes position_start==0 \
-                         (prefill path); got {position_start}"
-                    );
                     // Host (prefill) path uses the new BM_S-sharded
                     // kernel: partition tile is [1, BM_S, VEC_BLOCK] so
                     // the grid becomes (num_kv_heads, max_seq_len/BM_S, 1).
@@ -5823,6 +5982,7 @@ fn graph_op_name(op: &GraphOp) -> &'static str {
         GraphOp::QkNormRopeKvPrefill { .. } => "QkNormRopeKvPrefill",
         GraphOp::Attention { .. } => "Attention",
         GraphOp::GatherRow { .. } => "GatherRow",
+        GraphOp::GatherRows { .. } => "GatherRows",
         GraphOp::SliceCols { .. } => "SliceCols",
         GraphOp::MatMulSlice { .. } => "MatMulSlice",
         GraphOp::AddRmsNorm { .. } => "AddRmsNorm",
@@ -5892,7 +6052,7 @@ fn concat_weight_rows_2d(
 
     // Allocate the merged tensor and copy each source into it.
     let ctx = cuda_async::device_operation::ExecutionContext::new(stream.clone());
-    let dst_ptr = unsafe { cuda_core::malloc_async(total_bytes, stream) };
+    let dst_ptr = unsafe { cuda_core::malloc_async(total_bytes, stream) }?;
     let mut offset_bytes = 0u64;
     for (src_ptr, t_bytes) in &src_parts {
         unsafe {
@@ -5923,6 +6083,126 @@ fn argmax_f16(values: &[f16]) -> usize {
         }
     }
     best_i
+}
+
+#[cfg(test)]
+mod mtp_gpu_tests {
+    use super::*;
+    use crate::mtp::{MtpOptions, Strategy, accepted_count, top1};
+
+    async fn uncached(
+        engine: &mut Qwen3Engine,
+        prompt: &str,
+        budget: usize,
+        options: MtpOptions,
+    ) -> Result<Vec<u32>> {
+        engine.reset_cache().await?;
+        let mut prefix = engine.encode_prompt(&engine.maybe_apply_chat_template(prompt))?;
+        let prompt_len = prefix.len();
+        while prefix.len() - prompt_len < budget {
+            let k = options.k.min(budget - (prefix.len() - prompt_len));
+            let mut input = prefix.clone();
+            input.extend(std::iter::repeat_n(options.mask_id, k - 1));
+            let logits = with_context(|ctx| {
+                value((|| -> Result<Arc<Tensor<f16>>> {
+                    let graph = engine.build_step_graph_rows(input.len(), k)?;
+                    let mut pool = TensorPool::from_plan_ctx(ctx, &graph.pool_plan)?;
+                    engine.execute_step_graph_ctx(ctx, &graph, &mut pool, &input, 0)
+                })())
+            })
+            .await??
+            .to_host_vec()
+            .await?;
+            let preds = logits
+                .chunks_exact(engine.cfg.vocab_size)
+                .map(|row| top1(&row.iter().map(|x| x.to_f32()).collect::<Vec<_>>()))
+                .collect::<Result<Vec<_>>>()?;
+            let count = accepted_count(
+                &preds.iter().map(|p| p.1).collect::<Vec<_>>(),
+                options.strategy,
+            )?;
+            for &(id, _) in &preds[..count] {
+                prefix.push(id);
+                if engine.eos_token_ids.contains(&id) {
+                    return Ok(prefix[prompt_len..].to_vec());
+                }
+            }
+        }
+        Ok(prefix[prompt_len..].to_vec())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "requires the 4B checkpoint and CUDA; exercises cached vs full-prefix MTP"]
+    async fn cached_mtp_matches_full_prefix_and_ntp() -> Result<()> {
+        let path = std::env::var("GROUT_E2E_MODEL")
+            .unwrap_or_else(|_| "vendor/models/qwen3-4b-Inst-2507-MTP".into());
+        let mut engine = Qwen3Engine::load(Path::new(&path), Some(128)).await?;
+        engine.set_sampling_enabled(false);
+        let prompt = "What is 2 + 2?";
+        let mask = engine.mtp_mask_id()?;
+        let ntp = engine.generate(prompt, 6).await?.token_ids;
+        let mtp = engine
+            .generate_mtp(
+                prompt,
+                6,
+                MtpOptions {
+                    k: 1,
+                    mask_id: mask,
+                    strategy: Strategy::Static,
+                },
+            )
+            .await?;
+        assert_eq!(ntp, mtp.token_ids, "k=1 differs from existing NTP");
+        for (k, strategy) in [
+            (2, Strategy::Static),
+            (3, Strategy::Static),
+            (16, Strategy::Static),
+            (16, Strategy::ConfAdapt { threshold: 0.9 }),
+        ] {
+            let options = MtpOptions {
+                k,
+                mask_id: mask,
+                strategy,
+            };
+            let cached = engine.generate_mtp(prompt, 32, options).await?;
+            let full = uncached(&mut engine, prompt, 32, options).await?;
+            assert_eq!(
+                cached.token_ids, full,
+                "cached vs full-prefix k={k}, {strategy:?}"
+            );
+            assert_eq!(
+                cached.mtp_chunks.iter().sum::<usize>(),
+                cached.token_ids.len()
+            );
+        }
+        let empty = engine
+            .generate_mtp(
+                prompt,
+                0,
+                MtpOptions {
+                    k: 16,
+                    mask_id: mask,
+                    strategy: Strategy::Static,
+                },
+            )
+            .await?;
+        assert!(empty.token_ids.is_empty());
+        // Force a non-divisible length with EOS disabled to exercise k=3 -> k=1.
+        engine.eos_token_ids.clear();
+        let tail = engine
+            .generate_mtp(
+                prompt,
+                7,
+                MtpOptions {
+                    k: 3,
+                    mask_id: mask,
+                    strategy: Strategy::Static,
+                },
+            )
+            .await?;
+        assert_eq!(tail.mtp_chunks, [3, 3, 1]);
+        Ok(())
+    }
 }
 
 fn summarize_logits(logits: &[f16], tokenizer: &Tokenizer) -> Result<String> {

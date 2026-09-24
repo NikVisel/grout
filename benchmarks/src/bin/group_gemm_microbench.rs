@@ -95,7 +95,7 @@ impl CudaEvent {
         unsafe {
             cu_sys::cuEventCreate(
                 event.as_mut_ptr(),
-                cu_sys::CUevent_flags_enum_CU_EVENT_DEFAULT,
+                cu_sys::CUevent_flags_enum_CU_EVENT_DEFAULT as u32,
             )
             .result()
             .map_err(|e| anyhow!("cuEventCreate failed: {e:?}"))?;

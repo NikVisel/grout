@@ -5,3 +5,8 @@ benchmarks/results/
 *.nsys-rep
 *.sqlite
 *.qdstrm
+
+# Markdowns
+*whereileftoff.md
+
+*models

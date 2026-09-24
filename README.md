@@ -1,4 +1,14 @@
+**Note that this README.md belongs to the original codebase, and will be changed later on**
+
 # Grout
+
+Native Qwen3 MTP inference and CPU training are described in the
+[implementation guide](research/Qwen3-4b-MTPviaSelfDistillation/native-implementation.md),
+including the source-code map, run commands, and independent validation results.
+
+Packed Q4 inference for Qwen3 and Qwen3.5/MiMo, plus native Qwen3.5 text
+training, are described in the [quantized implementation guide](research/quantized-qwen35-implementation.md).
+The original FP16/cuTile backend remains available for unquantized Qwen3 models.
 
 Qwen3 inference engine built on
 [cuTile Rust](https://github.com/NVlabs/cutile-rs) 0.2.0.
